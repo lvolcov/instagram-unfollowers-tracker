@@ -168,21 +168,57 @@ class LoginSessionManager:
     async def _extract_user_info(self, context, page, log) -> dict:
         """Extract IG user info using the authenticated browser context."""
 
-        # Strategy 1: Playwright's context.request — uses session cookies, no page nav needed
+        # Strategy 1: fetch from inside the browser — correct UA + cookies automatically
         try:
-            log.info("user_info.trying_api_request")
+            log.info("user_info.trying_browser_fetch")
+            data = await page.evaluate("""async () => {
+                try {
+                    const r = await fetch('/api/v1/accounts/current_user/?edit=true', {
+                        headers: {
+                            'X-IG-App-ID': '936619743392459',
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                        credentials: 'include',
+                    });
+                    if (!r.ok) return {_status: r.status, _error: await r.text()};
+                    return await r.json();
+                } catch(e) {
+                    return {_exception: String(e)};
+                }
+            }""")
+            log.info("user_info.browser_fetch_result", result=str(data)[:200] if data else None)
+            if data and not data.get("_error") and not data.get("_exception"):
+                user = data.get("user", {})
+                if user.get("pk"):
+                    return {
+                        "instagram_user_id": str(user["pk"]),
+                        "username": user.get("username", ""),
+                        "full_name": user.get("full_name") or None,
+                        "profile_pic_url": (
+                            user.get("profile_pic_url_hd")
+                            or user.get("profile_pic_url")
+                            or None
+                        ),
+                    }
+        except Exception as exc:
+            log.warning("user_info.browser_fetch_exception", error=str(exc))
+
+        # Strategy 2: context.request with the browser's actual User-Agent header
+        try:
+            log.info("user_info.trying_context_request")
+            user_agent = await page.evaluate("() => navigator.userAgent")
             resp = await context.request.get(
                 INSTAGRAM_USER_API,
                 headers={
                     "X-IG-App-ID": "936619743392459",
                     "X-Requested-With": "XMLHttpRequest",
+                    "User-Agent": user_agent,
                 },
             )
-            log.info("user_info.api_response", status=resp.status)
+            log.info("user_info.context_request_status", status=resp.status)
             if resp.ok:
                 data = await resp.json()
                 user = data.get("user", {})
-                log.info("user_info.api_data", keys=list(user.keys()) if user else [])
                 if user.get("pk"):
                     return {
                         "instagram_user_id": str(user["pk"]),
@@ -196,55 +232,38 @@ class LoginSessionManager:
                     }
             else:
                 body = await resp.text()
-                log.warning("user_info.api_error", status=resp.status, body=body[:200])
+                log.warning("user_info.context_request_error", status=resp.status, body=body[:200])
         except Exception as exc:
-            log.warning("user_info.api_exception", error=str(exc))
+            log.warning("user_info.context_request_exception", error=str(exc))
 
-        # Strategy 2: navigate to the API URL in a new tab and read the JSON body
+        # Strategy 3: graphql viewer query (older API, still works on some accounts)
         try:
-            log.info("user_info.trying_new_tab_api")
-            api_page = await context.new_page()
-            await api_page.goto(INSTAGRAM_USER_API, wait_until="domcontentloaded")
-            body_text = await api_page.inner_text("body")
-            await api_page.close()
-            import json
-            data = json.loads(body_text)
-            user = data.get("user", {})
-            log.info("user_info.new_tab_data", keys=list(user.keys()) if user else [])
-            if user and user.get("pk"):
-                return {
-                    "instagram_user_id": str(user["pk"]),
-                    "username": user.get("username", ""),
-                    "full_name": user.get("full_name") or None,
-                    "profile_pic_url": (
-                        user.get("profile_pic_url_hd")
-                        or user.get("profile_pic_url")
-                        or None
-                    ),
-                }
-        except Exception as exc:
-            log.warning("user_info.new_tab_exception", error=str(exc))
-
-        # Strategy 3: window._sharedData from the current page
-        try:
-            log.info("user_info.trying_shared_data")
-            viewer = await page.evaluate("""() => {
-                const sd = window._sharedData?.config?.viewer;
-                if (sd?.id && sd?.username) return sd;
-                return null;
+            log.info("user_info.trying_graphql_viewer")
+            data = await page.evaluate("""async () => {
+                try {
+                    const r = await fetch('/graphql/query/', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                        body: 'doc_id=17846305414581823&variables={}',
+                        credentials: 'include',
+                    });
+                    if (!r.ok) return null;
+                    return r.json();
+                } catch(e) { return null; }
             }""")
-            log.info("user_info.shared_data", viewer=str(viewer)[:100] if viewer else None)
+            viewer = (data or {}).get("data", {}).get("viewer", {}).get("actor", {})
+            log.info("user_info.graphql_viewer", viewer=str(viewer)[:100] if viewer else None)
             if viewer and viewer.get("username"):
                 return {
-                    "instagram_user_id": str(viewer.get("id", f"uid_{viewer['username']}")),
+                    "instagram_user_id": str(viewer.get("id", "")),
                     "username": viewer["username"],
                     "full_name": viewer.get("full_name") or None,
                     "profile_pic_url": viewer.get("profile_pic_url") or None,
                 }
         except Exception as exc:
-            log.warning("user_info.shared_data_exception", error=str(exc))
+            log.warning("user_info.graphql_exception", error=str(exc))
 
-        # Strategy 4: grab username from the page URL / cookies
+        # Strategy 4: cookies — ds_user_id gives us the numeric ID, then resolve username
         try:
             log.info("user_info.trying_cookie_fallback")
             storage = await context.storage_state()
@@ -255,12 +274,40 @@ class LoginSessionManager:
             }
             log.info("user_info.cookie_names", names=list(cookies.keys()))
             ds_user_id = cookies.get("ds_user_id")
-            username_cookie = cookies.get("username")
             if ds_user_id:
-                username = username_cookie or f"user_{ds_user_id}"
+                # Try to resolve actual username via the user ID
+                try:
+                    user_data = await page.evaluate(f"""async () => {{
+                        try {{
+                            const r = await fetch('/api/v1/users/{ds_user_id}/info/', {{
+                                headers: {{'X-IG-App-ID': '936619743392459'}},
+                                credentials: 'include',
+                            }});
+                            if (!r.ok) return null;
+                            return r.json();
+                        }} catch(e) {{ return null; }}
+                    }}""")
+                    user = (user_data or {}).get("user", {})
+                    log.info("user_info.user_lookup", user=str(user)[:100] if user else None)
+                    if user and user.get("username"):
+                        return {
+                            "instagram_user_id": ds_user_id,
+                            "username": user["username"],
+                            "full_name": user.get("full_name") or None,
+                            "profile_pic_url": (
+                                user.get("profile_pic_url_hd")
+                                or user.get("profile_pic_url")
+                                or None
+                            ),
+                        }
+                except Exception as exc:
+                    log.warning("user_info.user_lookup_exception", error=str(exc))
+
+                # Last resort: ds_user_id as placeholder (will be corrected on next login)
+                log.warning("user_info.using_id_placeholder", ds_user_id=ds_user_id)
                 return {
                     "instagram_user_id": ds_user_id,
-                    "username": username,
+                    "username": f"user_{ds_user_id}",
                     "full_name": None,
                     "profile_pic_url": None,
                 }
@@ -269,7 +316,7 @@ class LoginSessionManager:
 
         raise RuntimeError(
             "Could not extract user info from Instagram — all strategies failed. "
-            "Check the container logs for details."
+            "Check container logs for details."
         )
 
     async def _persist_account(self, user_info: dict, storage_state: dict, log) -> Account:

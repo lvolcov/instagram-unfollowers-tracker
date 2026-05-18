@@ -47,11 +47,12 @@ def test_dashboard_has_header(page: Page) -> None:
 
 def test_dashboard_has_add_account_button(page: Page) -> None:
     page.goto(BASE_URL)
-    # "Add account" or "+" button exists somewhere on the page
-    btn = page.get_by_role("link", name="+").or_(
-        page.get_by_role("button", name="+")
+    # The AccountSwitcher header always shows an aria-label="Add account" link.
+    # On an empty dashboard there is also a big "Add Account" CTA — either is fine.
+    btn = page.get_by_role("link", name="Add account").or_(
+        page.get_by_role("button", name="Add Account")
     ).or_(
-        page.get_by_text("Add account", exact=False)
+        page.get_by_text("Add Account", exact=True)
     ).first
     expect(btn).to_be_visible()
     shot(page, "03_dashboard_add_button")
