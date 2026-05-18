@@ -18,7 +18,7 @@ async def start_login() -> dict:
     session = await login_session_manager.start()
     return {
         "session_id": session.id,
-        "novnc_url": f"/novnc/vnc.html?autoconnect=true&resize=remote&path=novnc/{session.id}",
+        "novnc_url": f"/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/{session.id}",
         "expires_in": 600,
     }
 

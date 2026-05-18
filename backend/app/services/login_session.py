@@ -13,18 +13,21 @@ from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urlparse
 
+import structlog
 from sqlalchemy import select
 
 from backend.app.core.database import AsyncSessionLocal
 from backend.app.instagram.session_store import save_session
 from backend.app.models.account import Account
 
+logger = structlog.get_logger(__name__)
 
 LoginStatus = Literal["waiting", "logged_in", "failed", "expired", "cancelled"]
 
 INSTAGRAM_LOGIN_URL = "https://www.instagram.com/accounts/login/"
+INSTAGRAM_USER_API = "https://www.instagram.com/api/v1/accounts/current_user/?edit=true"
 
-# Paths that are part of the login / challenge flow — user is NOT yet logged in
+# Paths that mean the user has NOT yet completed the login flow
 _LOGIN_FLOW_PATHS = (
     "/accounts/login",
     "/challenge",
@@ -32,8 +35,7 @@ _LOGIN_FLOW_PATHS = (
     "/accounts/suspended",
 )
 
-# How long (seconds) to wait for the user to complete login before timing out
-_LOGIN_TIMEOUT_S = 600
+_LOGIN_TIMEOUT_S = 600  # 10 minutes
 
 
 @dataclass
@@ -54,6 +56,7 @@ class LoginSessionManager:
         session = LoginSession(id=uuid.uuid4().hex)
         self._sessions[session.id] = session
         session._task = asyncio.create_task(self._run_login(session))
+        logger.info("login_session.started", session_id=session.id)
         return session
 
     def get(self, session_id: str) -> LoginSession | None:
@@ -71,12 +74,14 @@ class LoginSessionManager:
                 await session._browser.close()
             except Exception:
                 pass
+        logger.info("login_session.cancelled", session_id=session_id)
 
     # ------------------------------------------------------------------
-    # Internal: run the full login flow
+    # Internal: full login flow
     # ------------------------------------------------------------------
 
     async def _run_login(self, session: LoginSession) -> None:
+        log = logger.bind(session_id=session.id)
         try:
             from playwright.async_api import async_playwright
 
@@ -92,54 +97,51 @@ class LoginSessionManager:
                     ],
                 )
                 session._browser = browser
+                log.info("browser.launched")
 
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 720},
                     locale="en-US",
                     timezone_id="Europe/London",
-                    # Suppress the "controlled by automation" infobar
                     extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                 )
-
                 page = await context.new_page()
+
+                log.info("navigating_to_login")
                 await page.goto(INSTAGRAM_LOGIN_URL, wait_until="domcontentloaded")
 
-                # Block until the user successfully logs in (or we time out)
-                logged_in = await self._wait_for_login(session, page)
-
+                logged_in = await self._wait_for_login(session, page, log)
                 if not logged_in:
-                    return  # status already set by _wait_for_login
+                    log.warning("login_not_completed", status=session.status)
+                    await browser.close()
+                    return
 
-                # Give the page a moment to settle after the redirect
-                await asyncio.sleep(2)
+                # Give Instagram a moment to fully establish the session
+                await asyncio.sleep(3)
+                current_url = page.url
+                log.info("login_detected", url=current_url)
 
-                user_info = await self._extract_user_info(page)
+                user_info = await self._extract_user_info(context, page, log)
                 storage_state = await context.storage_state()
 
-                account = await self._persist_account(user_info, storage_state)
+                account = await self._persist_account(user_info, storage_state, log)
 
                 session.status = "logged_in"
-                session.account_summary = {
-                    "id": account.id,
-                    "username": account.username,
-                }
+                session.account_summary = {"id": account.id, "username": account.username}
+                log.info("login_session.completed", username=account.username, account_id=account.id)
 
                 await browser.close()
 
         except asyncio.CancelledError:
-            pass
+            log.info("login_session.task_cancelled")
         except Exception as exc:
             session.status = "failed"
             session.error = str(exc)
+            log.exception("login_session.failed", error=str(exc))
 
-    async def _wait_for_login(self, session: LoginSession, page) -> bool:
-        """
-        Poll until:
-          - The browser URL has left the Instagram login/challenge flow → True
-          - The session is cancelled                                     → False
-          - The timeout is reached                                       → False (sets expired)
-        """
-        for _ in range(_LOGIN_TIMEOUT_S // 2):
+    async def _wait_for_login(self, session: LoginSession, page, log) -> bool:
+        """Poll until the browser URL has left the Instagram login/challenge flow."""
+        for tick in range(_LOGIN_TIMEOUT_S // 2):
             if session.status != "waiting":
                 return False
 
@@ -149,13 +151,13 @@ class LoginSessionManager:
                 on_instagram = "instagram.com" in parsed.netloc
                 in_login_flow = any(parsed.path.startswith(p) for p in _LOGIN_FLOW_PATHS)
 
-                if on_instagram and not in_login_flow and parsed.path not in ("/", ""):
+                if tick % 15 == 0:  # log every 30 s to avoid noise
+                    log.debug("waiting_for_login", url=url, in_login_flow=in_login_flow)
+
+                if on_instagram and not in_login_flow:
                     return True
-                # Also accept the home feed root
-                if on_instagram and parsed.path in ("/", "") and "instagram.com" in parsed.netloc:
-                    return True
-            except Exception:
-                pass  # page navigating, retry
+            except Exception as exc:
+                log.debug("url_check_error", error=str(exc))
 
             await asyncio.sleep(2)
 
@@ -163,39 +165,75 @@ class LoginSessionManager:
             session.status = "expired"
         return False
 
-    async def _extract_user_info(self, page) -> dict:
-        """Extract IG user info from an authenticated page session."""
-        # Strategy 1: Instagram internal REST API (most reliable)
-        try:
-            data = await page.evaluate("""async () => {
-                const r = await fetch('/api/v1/accounts/current_user/?edit=true', {
-                    headers: {
-                        'X-IG-App-ID': '936619743392459',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                    credentials: 'include',
-                });
-                if (!r.ok) return null;
-                const json = await r.json();
-                return json.user ?? null;
-            }""")
-            if data and data.get("pk"):
-                return {
-                    "instagram_user_id": str(data["pk"]),
-                    "username": data.get("username", ""),
-                    "full_name": data.get("full_name") or None,
-                    "profile_pic_url": data.get("profile_pic_url") or None,
-                }
-        except Exception:
-            pass
+    async def _extract_user_info(self, context, page, log) -> dict:
+        """Extract IG user info using the authenticated browser context."""
 
-        # Strategy 2: window.__additionalDataLoaded / _sharedData
+        # Strategy 1: Playwright's context.request — uses session cookies, no page nav needed
         try:
+            log.info("user_info.trying_api_request")
+            resp = await context.request.get(
+                INSTAGRAM_USER_API,
+                headers={
+                    "X-IG-App-ID": "936619743392459",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+            log.info("user_info.api_response", status=resp.status)
+            if resp.ok:
+                data = await resp.json()
+                user = data.get("user", {})
+                log.info("user_info.api_data", keys=list(user.keys()) if user else [])
+                if user.get("pk"):
+                    return {
+                        "instagram_user_id": str(user["pk"]),
+                        "username": user.get("username", ""),
+                        "full_name": user.get("full_name") or None,
+                        "profile_pic_url": (
+                            user.get("profile_pic_url_hd")
+                            or user.get("profile_pic_url")
+                            or None
+                        ),
+                    }
+            else:
+                body = await resp.text()
+                log.warning("user_info.api_error", status=resp.status, body=body[:200])
+        except Exception as exc:
+            log.warning("user_info.api_exception", error=str(exc))
+
+        # Strategy 2: navigate to the API URL in a new tab and read the JSON body
+        try:
+            log.info("user_info.trying_new_tab_api")
+            api_page = await context.new_page()
+            await api_page.goto(INSTAGRAM_USER_API, wait_until="domcontentloaded")
+            body_text = await api_page.inner_text("body")
+            await api_page.close()
+            import json
+            data = json.loads(body_text)
+            user = data.get("user", {})
+            log.info("user_info.new_tab_data", keys=list(user.keys()) if user else [])
+            if user and user.get("pk"):
+                return {
+                    "instagram_user_id": str(user["pk"]),
+                    "username": user.get("username", ""),
+                    "full_name": user.get("full_name") or None,
+                    "profile_pic_url": (
+                        user.get("profile_pic_url_hd")
+                        or user.get("profile_pic_url")
+                        or None
+                    ),
+                }
+        except Exception as exc:
+            log.warning("user_info.new_tab_exception", error=str(exc))
+
+        # Strategy 3: window._sharedData from the current page
+        try:
+            log.info("user_info.trying_shared_data")
             viewer = await page.evaluate("""() => {
                 const sd = window._sharedData?.config?.viewer;
                 if (sd?.id && sd?.username) return sd;
                 return null;
             }""")
+            log.info("user_info.shared_data", viewer=str(viewer)[:100] if viewer else None)
             if viewer and viewer.get("username"):
                 return {
                     "instagram_user_id": str(viewer.get("id", f"uid_{viewer['username']}")),
@@ -203,33 +241,38 @@ class LoginSessionManager:
                     "full_name": viewer.get("full_name") or None,
                     "profile_pic_url": viewer.get("profile_pic_url") or None,
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("user_info.shared_data_exception", error=str(exc))
 
-        # Strategy 3: navigate to profile page and scrape username from URL
+        # Strategy 4: grab username from the page URL / cookies
         try:
-            await page.goto("https://www.instagram.com/accounts/edit/", wait_until="domcontentloaded")
-            url_after = page.url
-            # URL after redirect is typically instagram.com/accounts/edit/
-            # but username is sometimes visible in the page title
-            title = await page.title()
-            # title format: "Edit Profile • Instagram" or "@username • Edit Profile"
-            username_from_title = None
-            if "@" in title:
-                username_from_title = title.split("@")[1].split(" ")[0].strip()
-            if username_from_title:
+            log.info("user_info.trying_cookie_fallback")
+            storage = await context.storage_state()
+            cookies = {
+                c["name"]: c["value"]
+                for c in storage.get("cookies", [])
+                if "instagram.com" in c.get("domain", "")
+            }
+            log.info("user_info.cookie_names", names=list(cookies.keys()))
+            ds_user_id = cookies.get("ds_user_id")
+            username_cookie = cookies.get("username")
+            if ds_user_id:
+                username = username_cookie or f"user_{ds_user_id}"
                 return {
-                    "instagram_user_id": f"uid_{username_from_title}",
-                    "username": username_from_title,
+                    "instagram_user_id": ds_user_id,
+                    "username": username,
                     "full_name": None,
                     "profile_pic_url": None,
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("user_info.cookie_fallback_exception", error=str(exc))
 
-        raise RuntimeError("Could not extract user info from Instagram — please check your session.")
+        raise RuntimeError(
+            "Could not extract user info from Instagram — all strategies failed. "
+            "Check the container logs for details."
+        )
 
-    async def _persist_account(self, user_info: dict, storage_state: dict) -> Account:
+    async def _persist_account(self, user_info: dict, storage_state: dict, log) -> Account:
         """Upsert the account in the database and save the encrypted session file."""
         async with AsyncSessionLocal() as db:
             result = await db.execute(
@@ -240,26 +283,28 @@ class LoginSessionManager:
             account = result.scalar_one_or_none()
 
             if account:
+                log.info("account.updating_existing", account_id=account.id)
                 account.username = user_info["username"]
                 account.display_name = user_info.get("full_name")
                 account.profile_pic_url = user_info.get("profile_pic_url")
                 account.session_status = "active"
                 await db.flush()
             else:
+                log.info("account.creating_new", username=user_info["username"])
                 account = Account(
                     instagram_user_id=user_info["instagram_user_id"],
                     username=user_info["username"],
                     display_name=user_info.get("full_name"),
                     profile_pic_url=user_info.get("profile_pic_url"),
-                    session_path="",  # filled in after flush gives us the ID
+                    session_path="",
                     session_status="active",
                 )
                 db.add(account)
-                await db.flush()  # populate account.id
+                await db.flush()  # get account.id
 
-            # Now we have account.id — save the encrypted session file
             session_filename = save_session(account.id, storage_state)
             account.session_path = session_filename
+            log.info("session.saved", filename=session_filename, account_id=account.id)
 
             await db.commit()
             await db.refresh(account)

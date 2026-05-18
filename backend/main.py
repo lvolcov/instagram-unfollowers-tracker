@@ -1,7 +1,10 @@
 """FastAPI entrypoint for Instagram Unfollowers Tracker."""
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+import structlog
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +15,20 @@ from backend.app.api.v1 import api_router
 from backend.app.core.config import settings
 from backend.app.core.database import init_db
 from backend.app.services.scheduler import start_scheduler, shutdown_scheduler
+
+# Configure structlog — plain-text output visible in docker compose logs
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.dev.ConsoleRenderer(colors=False),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(
+        getattr(logging, settings.LOG_LEVEL, logging.INFO)
+    ),
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL, logging.INFO))
 
 
 @asynccontextmanager

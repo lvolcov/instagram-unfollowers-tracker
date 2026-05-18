@@ -45,7 +45,7 @@ export function AddAccount() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="max-w-5xl mx-auto">
       <h1 className="text-2xl font-semibold mb-4">Add Instagram Account</h1>
 
       {!sessionId && (
@@ -75,7 +75,8 @@ export function AddAccount() {
           <iframe
             src={novncUrl}
             title="Instagram Login"
-            className="w-full h-[640px] bg-black"
+            className="w-full bg-black"
+            style={{ height: "75vh", minHeight: 500 }}
           />
         </div>
       )}
