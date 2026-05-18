@@ -5,7 +5,7 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci
+RUN npm install
 
 COPY frontend/ ./
 RUN npm run build
@@ -19,7 +19,9 @@ FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy AS backend
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=UTC
 
 WORKDIR /app
 

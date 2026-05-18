@@ -4,6 +4,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.database import get_db
@@ -35,7 +36,11 @@ async def add_to_whitelist(
         note=payload.note,
     )
     db.add(entry)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Already whitelisted")
     await db.refresh(entry)
     return entry
 
