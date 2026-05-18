@@ -19,6 +19,7 @@ class ScanResult(BaseModel):
 
 class ScanJob(BaseModel):
     job_id: str
+    account_id: int = 0
     status: ScanStatus
     progress: ScanProgress | None = None
     result: ScanResult | None = None

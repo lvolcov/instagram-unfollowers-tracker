@@ -1,18 +1,10 @@
-"""Instagram GraphQL client.
+"""Instagram private REST API client.
 
-Uses the same query hash and pagination strategy as the original
-InstagramUnfollowers browser tool (David Arroyo, MIT licensed) but
-runs server-side with cookies extracted from a Playwright session.
+Uses the same session cookies saved by Playwright login.
+Endpoints mirror what the Instagram mobile app uses — more stable
+than the old GraphQL hashes which rotate frequently.
 
-Endpoint:
-  GET https://www.instagram.com/graphql/query/
-    ?query_hash=3dec7e2c57367ef3da3d987d89f9dbc8
-    &variables={"id":"<ds_user_id>","include_reel":"true","fetch_mutual":"false","first":"24","after":"<cursor>"}
-
-Required cookies:
-  - sessionid
-  - ds_user_id
-  - csrftoken
+Required cookies:  sessionid, ds_user_id, csrftoken
 """
 from __future__ import annotations
 
@@ -25,8 +17,14 @@ import httpx
 
 from backend.app.core.config import settings
 
-QUERY_HASH = "3dec7e2c57367ef3da3d987d89f9dbc8"
-GRAPHQL_URL = "https://www.instagram.com/graphql/query/"
+BASE = "https://www.instagram.com"
+IG_APP_ID = "936619743392459"
+
+_DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -37,91 +35,89 @@ class IGUser:
     profile_pic_url: str
     is_private: bool
     is_verified: bool
-    follows_viewer: bool
-    followed_by_viewer: bool
+
+
+class SessionExpiredError(Exception):
+    """Raised when IG returns 401 / 'login_required'."""
 
 
 class InstagramClient:
     def __init__(self, *, cookies: dict[str, str], user_agent: str | None = None) -> None:
         self._cookies = cookies
-        self._user_agent = user_agent or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        )
+        self._ua = user_agent or _DEFAULT_UA
 
     @property
     def ds_user_id(self) -> str:
         return self._cookies["ds_user_id"]
 
-    async def iter_following(self, user_id: str | None = None) -> AsyncIterator[IGUser]:
-        """Paginate over the user's `following` list.
+    def _make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=BASE,
+            cookies=self._cookies,
+            headers={
+                "User-Agent": self._ua,
+                "X-IG-App-ID": IG_APP_ID,
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": self._cookies.get("csrftoken", ""),
+                "Referer": "https://www.instagram.com/",
+            },
+            timeout=20,
+            follow_redirects=True,
+        )
 
-        TODO (Phase 1):
-        - Yield each user as IGUser
-        - Implement realistic delays (settings.IG_TIME_BETWEEN_CYCLES_MS)
-        - Backoff every 5 cycles (settings.IG_TIME_AFTER_FIVE_CYCLES_MS)
-        - Handle 401/403 by raising SessionExpiredError
-        """
-        target_id = user_id or self.ds_user_id
+    async def iter_followers(self, user_id: str | None = None) -> AsyncIterator[IGUser]:
+        """Yield every account that follows user_id (defaults to self)."""
+        uid = user_id or self.ds_user_id
+        async for user in self._paginate(f"/api/v1/friendships/{uid}/followers/"):
+            yield user
+
+    async def iter_following(self, user_id: str | None = None) -> AsyncIterator[IGUser]:
+        """Yield every account that user_id follows (defaults to self)."""
+        uid = user_id or self.ds_user_id
+        async for user in self._paginate(f"/api/v1/friendships/{uid}/following/"):
+            yield user
+
+    async def _paginate(self, path: str) -> AsyncIterator[IGUser]:
         cursor: str | None = None
         cycles = 0
 
-        async with httpx.AsyncClient(
-            cookies=self._cookies,
-            headers={"User-Agent": self._user_agent},
-            timeout=15,
-        ) as client:
+        async with self._make_client() as client:
             while True:
-                variables = (
-                    f'{{"id":"{target_id}","include_reel":"true",'
-                    f'"fetch_mutual":"false","first":"24"'
-                    + (f',"after":"{cursor}"' if cursor else "")
-                    + "}"
-                )
-                response = await client.get(
-                    GRAPHQL_URL,
-                    params={"query_hash": QUERY_HASH, "variables": variables},
-                )
-                response.raise_for_status()
-                data = response.json()["data"]["user"]["edge_follow"]
+                params: dict = {"count": 100}
+                if cursor:
+                    params["max_id"] = cursor
 
-                for edge in data["edges"]:
-                    node = edge["node"]
+                resp = await client.get(path, params=params)
+
+                if resp.status_code == 401:
+                    raise SessionExpiredError("Instagram session expired — please re-login")
+
+                if resp.status_code == 429:
+                    await asyncio.sleep(60)
+                    resp = await client.get(path, params=params)
+
+                resp.raise_for_status()
+                data = resp.json()
+
+                if data.get("status") == "fail" or "login_required" in str(data):
+                    raise SessionExpiredError("Instagram session expired — please re-login")
+
+                for raw in data.get("users", []):
                     yield IGUser(
-                        id=node["id"],
-                        username=node["username"],
-                        full_name=node.get("full_name", ""),
-                        profile_pic_url=node.get("profile_pic_url", ""),
-                        is_private=node.get("is_private", False),
-                        is_verified=node.get("is_verified", False),
-                        follows_viewer=node.get("follows_viewer", False),
-                        followed_by_viewer=node.get("followed_by_viewer", False),
+                        id=str(raw.get("pk") or raw.get("id", "")),
+                        username=raw.get("username", ""),
+                        full_name=raw.get("full_name", "") or "",
+                        profile_pic_url=raw.get("profile_pic_url", "") or "",
+                        is_private=bool(raw.get("is_private", False)),
+                        is_verified=bool(raw.get("is_verified", False)),
                     )
 
-                if not data["page_info"]["has_next_page"]:
+                cursor = data.get("next_max_id")
+                if not cursor:
                     break
-                cursor = data["page_info"]["end_cursor"]
 
-                # Human-like delay
-                base = settings.IG_TIME_BETWEEN_CYCLES_MS / 1000
-                await asyncio.sleep(base + random.uniform(0.5, 2.0))
                 cycles += 1
+                delay = settings.IG_TIME_BETWEEN_CYCLES_MS / 1000
+                await asyncio.sleep(delay + random.uniform(0.3, 1.5))
                 if cycles % 5 == 0:
                     await asyncio.sleep(settings.IG_TIME_AFTER_FIVE_CYCLES_MS / 1000)
-
-    async def iter_followers(self, user_id: str | None = None) -> AsyncIterator[IGUser]:
-        """Paginate over the user's `followers` list.
-
-        NOTE: Different query_hash needed than `iter_following`. The original
-        tool only enumerates `edge_follow` (following). To detect unfollowers
-        we actually compare against your `edge_followed_by` (followers) too.
-
-        TODO (Phase 1): Find the correct query_hash for `edge_followed_by`
-        from current IG web client traffic — these hashes change occasionally.
-        """
-        raise NotImplementedError("To be implemented in Phase 1")
-
-
-class SessionExpiredError(Exception):
-    """Raised when IG cookies are no longer valid (401/403 from GraphQL)."""
