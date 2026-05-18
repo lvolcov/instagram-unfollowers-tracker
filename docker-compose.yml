@@ -1,0 +1,23 @@
+services:
+  instagram-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: instagram-unfollowers-tracker:latest
+    container_name: instagram-tracker
+    restart: unless-stopped
+    ports:
+      # Map the dashboard port from .env to the container's internal port 8000.
+      # Change APP_PORT in .env to whatever's free on your host.
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # Persistent storage for SQLite DB + encrypted IG sessions.
+      - ./data:/app/data
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
