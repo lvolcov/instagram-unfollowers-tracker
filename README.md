@@ -31,7 +31,7 @@ Built with **FastAPI** (Python) backend and **React + TypeScript** frontend. Des
 
 1. Clone this repository to your server (e.g., `/opt/`):
    ```bash
-   cd /opt && git clone https://github.com/YOUR_USERNAME/instagram-unfollowers-tracker.git
+   cd /opt && git clone https://github.com/lvolcov/instagram-unfollowers-tracker.git
    cd instagram-unfollowers-tracker
    ```
 
