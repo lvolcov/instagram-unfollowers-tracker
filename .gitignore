@@ -57,3 +57,6 @@ logs/
 # ----- Playwright -----
 playwright-report/
 test-results/
+
+# ----- Local development notes -----
+CLAUDE.md
