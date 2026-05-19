@@ -37,7 +37,8 @@ async def init_db() -> None:
     # Import models so SQLAlchemy registers them on Base.metadata.
     # noqa: F401 — imports needed for side effects.
     from backend.app.models import (  # noqa: F401
-        account,
+        login_account,
+        tracked_account,
         snapshot,
         unfollower,
         whitelist,

@@ -1,7 +1,7 @@
-"""Instagram login flow via Playwright + noVNC.
+"""LoginAccount login flow via Playwright + noVNC (singleton).
 
 Endpoints:
-- POST   /auth/login/start          → spawn Playwright session, return noVNC URL
+- POST   /auth/login/start          → spawn Playwright window, return noVNC URL
 - GET    /auth/login/status/{sid}   → poll login progress
 - POST   /auth/login/cancel/{sid}   → cancel an in-progress login
 """
@@ -14,8 +14,10 @@ router = APIRouter()
 
 @router.post("/login/start")
 async def start_login() -> dict:
-    """Spawn a Playwright browser session for adding a new account."""
-    session = await login_session_manager.start()
+    try:
+        session = await login_session_manager.start()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {
         "session_id": session.id,
         "novnc_url": f"/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/{session.id}",

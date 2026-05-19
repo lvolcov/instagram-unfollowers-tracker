@@ -1,10 +1,23 @@
-export interface Account {
+export interface LoginAccount {
   id: number;
   instagram_user_id: string;
   username: string;
   display_name: string | null;
   profile_pic_url: string | null;
   session_status: "active" | "needs_relogin" | "expired" | "scanning";
+  created_at: string;
+  last_active_at: string | null;
+}
+
+export interface TrackedAccount {
+  id: number;
+  instagram_user_id: string;
+  username: string;
+  display_name: string | null;
+  profile_pic_url: string | null;
+  is_private: boolean;
+  follows_us: boolean;
+  we_follow: boolean;
   created_at: string;
   last_scan_at: string | null;
 }
@@ -20,7 +33,7 @@ export interface IGUser {
 
 export interface Unfollower {
   id: number;
-  account_id: number;
+  tracked_account_id: number;
   instagram_user_id: string;
   username: string;
   full_name: string | null;
@@ -32,7 +45,7 @@ export interface Unfollower {
 
 export interface WhitelistEntry {
   id: number;
-  account_id: number;
+  tracked_account_id: number;
   instagram_user_id: string;
   username: string;
   note: string | null;
@@ -43,7 +56,7 @@ export type ScheduleMode = "daily_at" | "interval_hours" | "manual_only";
 
 export interface Schedule {
   id: number;
-  account_id: number;
+  tracked_account_id: number;
   mode: ScheduleMode;
   daily_time: string | null;
   interval_hours: number | null;
@@ -60,8 +73,9 @@ export interface ScheduleUpdate {
 
 export interface ScanJob {
   job_id: string;
+  tracked_account_id: number;
   status: "queued" | "running" | "completed" | "failed";
   progress?: { phase: string; current: number; total: number };
-  result?: { snapshot_id: number; new_unfollowers: number };
+  result?: { snapshot_id: number; new_unfollowers: number; warning?: string | null };
   error?: string;
 }

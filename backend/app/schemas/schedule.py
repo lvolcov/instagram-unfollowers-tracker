@@ -9,7 +9,7 @@ class ScheduleRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    account_id: int
+    tracked_account_id: int
     mode: Literal["daily_at", "interval_hours", "manual_only"]
     daily_time: str | None
     interval_hours: int | None

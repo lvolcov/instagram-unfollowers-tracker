@@ -1,4 +1,4 @@
-"""Whitelist — accounts user marks as 'OK to not follow back'."""
+"""Whitelist — accounts the user has marked as 'OK to not follow back'."""
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
@@ -10,11 +10,15 @@ from backend.app.core.database import Base
 class WhitelistEntry(Base):
     __tablename__ = "whitelist"
     __table_args__ = (
-        UniqueConstraint("account_id", "instagram_user_id", name="uq_whitelist_account_user"),
+        UniqueConstraint(
+            "tracked_account_id", "instagram_user_id", name="uq_whitelist_tracked_user"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    tracked_account_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_accounts.id", ondelete="CASCADE"), index=True
+    )
     instagram_user_id: Mapped[str] = mapped_column(String, index=True)
     username: Mapped[str] = mapped_column(String)
     note: Mapped[str | None] = mapped_column(String, nullable=True)

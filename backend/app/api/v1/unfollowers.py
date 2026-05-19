@@ -1,4 +1,4 @@
-"""Unfollower history endpoint."""
+"""Unfollower history per tracked account."""
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
@@ -12,9 +12,9 @@ from backend.app.schemas.unfollower import UnfollowerRead
 router = APIRouter()
 
 
-@router.get("/{account_id}/unfollowers", response_model=list[UnfollowerRead])
+@router.get("/{tracked_id}/unfollowers", response_model=list[UnfollowerRead])
 async def list_unfollowers(
-    account_id: int,
+    tracked_id: int,
     since: datetime | None = None,
     search: str | None = None,
     page: int = 1,
@@ -23,7 +23,7 @@ async def list_unfollowers(
 ) -> list[Unfollower]:
     stmt = (
         select(Unfollower)
-        .where(Unfollower.account_id == account_id)
+        .where(Unfollower.tracked_account_id == tracked_id)
         .order_by(Unfollower.detected_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)

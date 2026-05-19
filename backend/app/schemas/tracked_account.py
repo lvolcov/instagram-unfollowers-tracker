@@ -1,10 +1,10 @@
-"""Pydantic schemas for Account API."""
+"""Pydantic schemas for TrackedAccount."""
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class AccountRead(BaseModel):
+class TrackedAccountRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -12,12 +12,18 @@ class AccountRead(BaseModel):
     username: str
     display_name: str | None
     profile_pic_url: str | None
-    session_status: str
+    is_private: bool
+    follows_us: bool
+    we_follow: bool
     created_at: datetime
     last_scan_at: datetime | None
 
 
-class AccountStats(AccountRead):
+class TrackedAccountCreate(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+
+
+class TrackedAccountStats(TrackedAccountRead):
     followers_count: int = 0
     following_count: int = 0
     non_followers_count: int = 0

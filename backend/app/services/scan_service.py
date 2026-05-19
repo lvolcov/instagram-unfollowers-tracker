@@ -1,4 +1,4 @@
-"""Scan orchestration: fetch followers/following, diff, persist, notify."""
+"""Scan orchestration: open a real Chrome tab, fetch followers/following, diff, notify."""
 from __future__ import annotations
 
 import asyncio
@@ -6,15 +6,19 @@ import uuid
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from backend.app.core.database import AsyncSessionLocal
-from backend.app.instagram.client import IGUser, InstagramClient, SessionExpiredError
-from backend.app.instagram.session_store import cookies_from_storage, load_session
-from backend.app.models.account import Account
+from backend.app.instagram.browser_session import open_logged_in_page
+from backend.app.instagram.client import (
+    IGUser,
+    NotFollowingError,
+    SessionExpiredError,
+)
+from backend.app.models.login_account import LoginAccount
 from backend.app.models.snapshot import Snapshot, SnapshotUser
+from backend.app.models.tracked_account import TrackedAccount
 from backend.app.models.unfollower import Unfollower
-from backend.app.models.whitelist import WhitelistEntry
 from backend.app.schemas.scan import ScanJob, ScanProgress, ScanResult
 from backend.app.services.webhook_service import webhook_service
 
@@ -24,169 +28,264 @@ logger = structlog.get_logger(__name__)
 class ScanService:
     def __init__(self) -> None:
         self._jobs: dict[str, ScanJob] = {}
+        self._scan_lock = asyncio.Lock()  # only one scan at a time (shared Xvfb display)
 
-    async def enqueue(self, account_id: int) -> ScanJob:
-        job = ScanJob(job_id=uuid.uuid4().hex, account_id=account_id, status="queued")
+    async def enqueue(self, tracked_account_id: int) -> ScanJob:
+        job = ScanJob(
+            job_id=uuid.uuid4().hex,
+            tracked_account_id=tracked_account_id,
+            status="queued",
+        )
         self._jobs[job.job_id] = job
-        asyncio.create_task(self._run(account_id, job))
+        asyncio.create_task(self._run(tracked_account_id, job))
         return job
 
     def get_job(self, job_id: str) -> ScanJob | None:
         return self._jobs.get(job_id)
 
-    # ------------------------------------------------------------------
+    async def _run(self, tracked_account_id: int, job: ScanJob) -> None:
+        log = logger.bind(tracked_account_id=tracked_account_id, job_id=job.job_id)
+        async with self._scan_lock:
+            job.status = "running"
+            snapshot_id: int | None = None
 
-    async def _run(self, account_id: int, job: ScanJob) -> None:
-        log = logger.bind(account_id=account_id, job_id=job.job_id)
-        job.status = "running"
-        snapshot_id: int | None = None
-
-        try:
-            # Load account
-            async with AsyncSessionLocal() as db:
-                account = await db.get(Account, account_id)
-                if not account:
-                    raise ValueError(f"Account {account_id} not found")
-                session_path = account.session_path
-                username = account.username
-
-            if not session_path:
-                raise ValueError("No saved session — please re-login")
-
-            storage = load_session(session_path)
-            cookies = cookies_from_storage(storage)
-            if not cookies.get("sessionid"):
-                raise ValueError("Session cookies are missing sessionid — please re-login")
-
-            client = InstagramClient(cookies=cookies)
-            log.info("scan.started", username=username)
-
-            # Create snapshot row
-            async with AsyncSessionLocal() as db:
-                snapshot = Snapshot(account_id=account_id, status="running")
-                db.add(snapshot)
-                await db.flush()
-                snapshot_id = snapshot.id
-                await db.commit()
-
-            # ---- fetch followers ----
-            log.info("scan.fetching_followers")
-            job.progress = ScanProgress(phase="followers", current=0, total=0)
-            followers: list[IGUser] = []
-            async for user in client.iter_followers():
-                followers.append(user)
-                job.progress = ScanProgress(phase="followers", current=len(followers), total=0)
-            log.info("scan.followers_done", count=len(followers))
-
-            # ---- fetch following ----
-            log.info("scan.fetching_following")
-            job.progress = ScanProgress(phase="following", current=0, total=0)
-            following: list[IGUser] = []
-            async for user in client.iter_following():
-                following.append(user)
-                job.progress = ScanProgress(phase="following", current=len(following), total=0)
-            log.info("scan.following_done", count=len(following))
-
-            # ---- persist snapshot users ----
-            follower_ids = {u.id for u in followers}
-            following_ids = {u.id for u in following}
-
-            rows: list[SnapshotUser] = []
-            for u in followers:
-                rel = "mutual" if u.id in following_ids else "follower"
-                rows.append(SnapshotUser(
-                    snapshot_id=snapshot_id,
-                    instagram_user_id=u.id,
-                    username=u.username,
-                    full_name=u.full_name or None,
-                    profile_pic_url=u.profile_pic_url or None,
-                    is_verified=u.is_verified,
-                    is_private=u.is_private,
-                    relationship=rel,
-                ))
-            for u in following:
-                if u.id not in follower_ids:
-                    rows.append(SnapshotUser(
-                        snapshot_id=snapshot_id,
-                        instagram_user_id=u.id,
-                        username=u.username,
-                        full_name=u.full_name or None,
-                        profile_pic_url=u.profile_pic_url or None,
-                        is_verified=u.is_verified,
-                        is_private=u.is_private,
-                        relationship="following",
-                    ))
-
-            async with AsyncSessionLocal() as db:
-                db.add_all(rows)
-                snap = await db.get(Snapshot, snapshot_id)
-                snap.followers_count = len(followers)
-                snap.following_count = len(following)
-                snap.status = "completed"
-                acc = await db.get(Account, account_id)
-                acc.last_scan_at = datetime.now(timezone.utc)
-                await db.commit()
-
-            log.info("scan.snapshot_saved", snapshot_id=snapshot_id, rows=len(rows))
-
-            # ---- diff unfollowers ----
-            job.progress = ScanProgress(phase="diff", current=0, total=0)
-            new_unfollowers = await self._diff_unfollowers(
-                account_id, snapshot_id, follower_ids, log
-            )
-            log.info("scan.diff_done", new_unfollowers=len(new_unfollowers))
-
-            # ---- notify ----
-            if new_unfollowers:
-                job.progress = ScanProgress(phase="notify", current=0, total=len(new_unfollowers))
-                try:
-                    await webhook_service.send(
-                        account=username,
-                        unfollowers=[u.username for u in new_unfollowers],
-                    )
-                    log.info("scan.webhook_sent", count=len(new_unfollowers))
-                except Exception as exc:
-                    log.warning("scan.webhook_failed", error=str(exc))
-
-            job.status = "completed"
-            job.progress = None
-            job.result = ScanResult(snapshot_id=snapshot_id, new_unfollowers=len(new_unfollowers))
-            log.info("scan.completed", new_unfollowers=len(new_unfollowers))
-
-        except SessionExpiredError as exc:
-            job.status = "failed"
-            job.error = str(exc)
-            log.warning("scan.session_expired", error=str(exc))
-            async with AsyncSessionLocal() as db:
-                acc = await db.get(Account, account_id)
-                if acc:
-                    acc.session_status = "needs_relogin"
-                    await db.commit()
-        except Exception as exc:
-            job.status = "failed"
-            job.error = str(exc)
-            log.exception("scan.failed", error=str(exc))
-            if snapshot_id:
+            try:
                 async with AsyncSessionLocal() as db:
-                    snap = await db.get(Snapshot, snapshot_id)
-                    if snap:
-                        snap.status = "failed"
-                        snap.error_message = str(exc)
+                    tracked = await db.get(TrackedAccount, tracked_account_id)
+                    if not tracked:
+                        raise ValueError(f"TrackedAccount {tracked_account_id} not found")
+                    login = (await db.execute(select(LoginAccount))).scalar_one_or_none()
+                    if not login:
+                        raise ValueError("No LoginAccount configured — please log in first.")
+                    target_uid = tracked.instagram_user_id
+                    target_username = tracked.username
+                    session_path = login.session_path
+
+                async with AsyncSessionLocal() as db:
+                    snapshot = Snapshot(
+                        tracked_account_id=tracked_account_id, status="running"
+                    )
+                    db.add(snapshot)
+                    await db.flush()
+                    snapshot_id = snapshot.id
+                    await db.commit()
+
+                async with open_logged_in_page(session_path) as ig:
+                    # Mandatory follow check — bail out cleanly if relationship is broken.
+                    status = await ig.friendship_status(target_uid)
+                    log.info(
+                        "scan.friendship",
+                        following=status.following,
+                        followed_by=status.followed_by,
+                        is_private=status.is_private,
+                    )
+                    if not status.following:
+                        raise NotFollowingError(
+                            f"Login account does not follow @{target_username}. "
+                            "Follow them from the logged-in account, then retry."
+                        )
+
+                    async with AsyncSessionLocal() as db:
+                        t = await db.get(TrackedAccount, tracked_account_id)
+                        t.follows_us = status.followed_by
+                        t.we_follow = status.following
+                        t.is_private = status.is_private
                         await db.commit()
+
+                    # Canonical counts so we know when pagination is complete.
+                    info = await ig.user_info(target_uid)
+                    expected_followers = int(info.get("follower_count") or 0)
+                    expected_following = int(info.get("following_count") or 0)
+                    log.info(
+                        "scan.canonical_counts",
+                        followers=expected_followers,
+                        following=expected_following,
+                    )
+
+                    def _progress(phase: str):
+                        def _cb(current: int, total: int, attempt: int) -> None:
+                            job.progress = ScanProgress(
+                                phase=f"{phase} (attempt {attempt})",
+                                current=current,
+                                total=total,
+                            )
+                        return _cb
+
+                    log.info("scan.fetching_followers", target=target_username)
+                    followers, fol_attempts, followers_complete = await ig.collect_complete(
+                        "followers",
+                        target_uid,
+                        expected_followers,
+                        on_progress=_progress("followers"),
+                    )
+
+                    log.info(
+                        "scan.fetching_following",
+                        followers_seen=len(followers),
+                        followers_attempts=fol_attempts,
+                        followers_complete=followers_complete,
+                    )
+                    following, fwg_attempts, following_complete = await ig.collect_complete(
+                        "following",
+                        target_uid,
+                        expected_following,
+                        on_progress=_progress("following"),
+                    )
+                    log.info(
+                        "scan.fetched",
+                        followers=len(followers),
+                        following=len(following),
+                        followers_complete=followers_complete,
+                        following_complete=following_complete,
+                        fol_attempts=fol_attempts,
+                        fwg_attempts=fwg_attempts,
+                    )
+
+                follower_ids = {u.id for u in followers}
+                following_ids = {u.id for u in following}
+
+                rows: list[SnapshotUser] = []
+                for u in followers:
+                    rel = "mutual" if u.id in following_ids else "follower"
+                    rows.append(
+                        SnapshotUser(
+                            snapshot_id=snapshot_id,
+                            instagram_user_id=u.id,
+                            username=u.username,
+                            full_name=u.full_name or None,
+                            profile_pic_url=u.profile_pic_url or None,
+                            is_verified=u.is_verified,
+                            is_private=u.is_private,
+                            relationship=rel,
+                        )
+                    )
+                for u in following:
+                    if u.id not in follower_ids:
+                        rows.append(
+                            SnapshotUser(
+                                snapshot_id=snapshot_id,
+                                instagram_user_id=u.id,
+                                username=u.username,
+                                full_name=u.full_name or None,
+                                profile_pic_url=u.profile_pic_url or None,
+                                is_verified=u.is_verified,
+                                is_private=u.is_private,
+                                relationship="following",
+                            )
+                        )
+
+                fully_captured = followers_complete and following_complete
+                warning: str | None = None
+                if not fully_captured:
+                    warning = (
+                        f"Captured {len(followers)}/{expected_followers} followers"
+                        f" (attempts {fol_attempts}) and"
+                        f" {len(following)}/{expected_following} following"
+                        f" (attempts {fwg_attempts}) — Instagram's re-ranking"
+                        " left a few users uncaptured. Diff proceeded; expect a"
+                        " few false-positive unfollowers."
+                    )
+                    log.warning("scan.partial", warning=warning)
+
+                async with AsyncSessionLocal() as db:
+                    db.add_all(rows)
+                    snap = await db.get(Snapshot, snapshot_id)
+                    snap.followers_count = len(followers)
+                    snap.following_count = len(following)
+                    # Always mark completed — we use whatever we captured.
+                    snap.status = "completed"
+                    if warning:
+                        snap.error_message = warning
+                    t = await db.get(TrackedAccount, tracked_account_id)
+                    t.last_scan_at = datetime.now(timezone.utc)
+                    await db.commit()
+
+                log.info(
+                    "scan.snapshot_saved",
+                    snapshot_id=snapshot_id,
+                    rows=len(rows),
+                    fully_captured=fully_captured,
+                )
+
+                job.progress = ScanProgress(
+                    phase="diff", current=0, total=len(followers)
+                )
+                new_unfollowers = await self._diff_unfollowers(
+                    tracked_account_id, snapshot_id, follower_ids, log
+                )
+
+                if new_unfollowers:
+                    job.progress = ScanProgress(
+                        phase="notify", current=0, total=len(new_unfollowers)
+                    )
+                    try:
+                        await webhook_service.send(
+                            account=target_username,
+                            unfollowers=[u.username for u in new_unfollowers],
+                        )
+                    except Exception as exc:
+                        log.warning("scan.webhook_failed", error=str(exc))
+
+                job.status = "completed"
+                job.progress = None
+                job.result = ScanResult(
+                    snapshot_id=snapshot_id,
+                    new_unfollowers=len(new_unfollowers),
+                    warning=warning,
+                )
+                log.info(
+                    "scan.completed",
+                    new_unfollowers=len(new_unfollowers),
+                    warning=bool(warning),
+                )
+
+            except NotFollowingError as exc:
+                job.status = "failed"
+                job.error = str(exc)
+                log.warning("scan.not_following", error=str(exc))
+                if snapshot_id:
+                    async with AsyncSessionLocal() as db:
+                        snap = await db.get(Snapshot, snapshot_id)
+                        if snap:
+                            snap.status = "failed"
+                            snap.error_message = str(exc)
+                            await db.commit()
+            except SessionExpiredError as exc:
+                job.status = "failed"
+                job.error = str(exc)
+                log.warning("scan.session_expired", error=str(exc))
+                async with AsyncSessionLocal() as db:
+                    login = (await db.execute(select(LoginAccount))).scalar_one_or_none()
+                    if login:
+                        login.session_status = "needs_relogin"
+                        await db.commit()
+            except Exception as exc:
+                job.status = "failed"
+                job.error = str(exc)
+                log.exception("scan.failed", error=str(exc))
+                if snapshot_id:
+                    async with AsyncSessionLocal() as db:
+                        snap = await db.get(Snapshot, snapshot_id)
+                        if snap:
+                            snap.status = "failed"
+                            snap.error_message = str(exc)
+                            await db.commit()
 
     async def _diff_unfollowers(
         self,
-        account_id: int,
+        tracked_account_id: int,
         current_snapshot_id: int,
         current_follower_ids: set[str],
         log,
     ) -> list[Unfollower]:
+        # Only diff against a previous snapshot that was itself fully captured.
+        # Diffing against an "incomplete" snapshot would surface phantom
+        # unfollowers (people who simply weren't paginated last time).
         async with AsyncSessionLocal() as db:
-            # Find most recent completed snapshot before this one
             prev_result = await db.execute(
                 select(Snapshot)
                 .where(
-                    Snapshot.account_id == account_id,
+                    Snapshot.tracked_account_id == tracked_account_id,
                     Snapshot.status == "completed",
                     Snapshot.id < current_snapshot_id,
                 )
@@ -194,12 +293,10 @@ class ScanService:
                 .limit(1)
             )
             prev_snap = prev_result.scalar_one_or_none()
-
             if not prev_snap:
                 log.info("scan.first_scan_no_diff")
                 return []
 
-            # Previous followers
             prev_followers_result = await db.execute(
                 select(SnapshotUser).where(
                     SnapshotUser.snapshot_id == prev_snap.id,
@@ -212,33 +309,32 @@ class ScanService:
             if not unfollower_ids:
                 return []
 
-            # Check which are already recorded
             existing_result = await db.execute(
                 select(Unfollower.instagram_user_id).where(
-                    Unfollower.account_id == account_id,
+                    Unfollower.tracked_account_id == tracked_account_id,
                     Unfollower.instagram_user_id.in_(unfollower_ids),
                 )
             )
-            already_recorded = {r for r in existing_result.scalars()}
-            new_ids = unfollower_ids - already_recorded
+            already = {r for r in existing_result.scalars()}
+            new_ids = unfollower_ids - already
 
             records: list[Unfollower] = []
             for uid in new_ids:
                 prev = prev_followers[uid]
-                records.append(Unfollower(
-                    account_id=account_id,
-                    instagram_user_id=uid,
-                    username=prev.username,
-                    full_name=prev.full_name,
-                    profile_pic_url=prev.profile_pic_url,
-                ))
-
+                records.append(
+                    Unfollower(
+                        tracked_account_id=tracked_account_id,
+                        instagram_user_id=uid,
+                        username=prev.username,
+                        full_name=prev.full_name,
+                        profile_pic_url=prev.profile_pic_url,
+                    )
+                )
             if records:
                 db.add_all(records)
                 await db.commit()
                 for r in records:
                     await db.refresh(r)
-
             log.info("scan.unfollowers_recorded", count=len(records))
             return records
 

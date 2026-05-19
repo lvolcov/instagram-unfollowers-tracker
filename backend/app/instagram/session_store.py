@@ -1,37 +1,29 @@
-"""Persist and load Playwright storage state encrypted on disk."""
+"""Encrypted persistence of the (single) LoginAccount's Playwright storage_state."""
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from backend.app.core.config import settings
 from backend.app.core.security import decrypt_bytes, encrypt_bytes
 
+_FILENAME = "login_account.bin"
 
-def save_session(account_id: int, storage_state: dict) -> str:
-    """Encrypt and persist a Playwright storage_state dict. Returns the relative path."""
+
+def save_session(storage_state: dict) -> str:
+    """Encrypt and persist storage_state for the single LoginAccount."""
     settings.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     raw = json.dumps(storage_state).encode()
-    encrypted = encrypt_bytes(raw)
-    filename = f"account_{account_id}.bin"
+    path = settings.SESSIONS_DIR / _FILENAME
+    path.write_bytes(encrypt_bytes(raw))
+    return _FILENAME
+
+
+def load_session(filename: str = _FILENAME) -> dict:
     path = settings.SESSIONS_DIR / filename
-    path.write_bytes(encrypted)
-    return filename
+    return json.loads(decrypt_bytes(path.read_bytes()))
 
 
-def load_session(filename: str) -> dict:
-    """Decrypt and return the stored Playwright storage_state dict."""
-    path: Path = settings.SESSIONS_DIR / filename
-    encrypted = path.read_bytes()
-    raw = decrypt_bytes(encrypted)
-    return json.loads(raw)
-
-
-def cookies_from_storage(storage_state: dict) -> dict[str, str]:
-    """Extract the Instagram cookies needed for GraphQL requests."""
-    needed = {"sessionid", "ds_user_id", "csrftoken"}
-    return {
-        c["name"]: c["value"]
-        for c in storage_state.get("cookies", [])
-        if c.get("name") in needed and c.get("domain", "").endswith("instagram.com")
-    }
+def delete_session(filename: str = _FILENAME) -> None:
+    path = settings.SESSIONS_DIR / filename
+    if path.exists():
+        path.unlink()

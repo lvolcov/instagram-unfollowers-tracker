@@ -1,16 +1,16 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 
-import type { Account } from "@/types/api";
+import type { TrackedAccount } from "@/types/api";
 
 interface AccountContextValue {
-  selectedAccount: Account | null;
-  setSelectedAccount: (account: Account | null) => void;
+  selectedAccount: TrackedAccount | null;
+  setSelectedAccount: (account: TrackedAccount | null) => void;
 }
 
 const AccountContext = createContext<AccountContextValue | undefined>(undefined);
 
 export function AccountProvider({ children }: { children: ReactNode }) {
-  const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<TrackedAccount | null>(null);
 
   return (
     <AccountContext.Provider value={{ selectedAccount, setSelectedAccount }}>

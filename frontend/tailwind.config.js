@@ -5,16 +5,17 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Match the original tool's dark aesthetic
-        background: "#111111",
-        surface: "#1c1c1e",
-        "surface-hover": "#2c2c2e",
-        primary: "#007aff",
-        "primary-hover": "#0051d5",
-        danger: "#ff3b30",
-        success: "#34c759",
-        muted: "#8e8e93",
-        border: "rgba(255,255,255,0.08)",
+        bg: "var(--bg)",
+        surface: "var(--surface)",
+        "surface-2": "var(--surface-2)",
+        primary: "var(--primary)",
+        "primary-hover": "var(--primary-hover)",
+        foreground: "var(--foreground)",
+        muted: "var(--muted)",
+        border: "var(--border-color)",
+        danger: "#ef4444",
+        success: "#22c55e",
+        warning: "#f59e0b",
       },
     },
   },

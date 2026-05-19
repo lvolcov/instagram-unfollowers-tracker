@@ -1,4 +1,4 @@
-"""Schedule ORM model — per-account scan scheduling."""
+"""Schedule ORM model — per-tracked-account scan scheduling."""
 from datetime import datetime
 from typing import Literal
 
@@ -14,7 +14,9 @@ class Schedule(Base):
     __tablename__ = "schedules"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), unique=True, index=True)
+    tracked_account_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_accounts.id", ondelete="CASCADE"), unique=True, index=True
+    )
 
     mode: Mapped[str] = mapped_column(String, default="manual_only")
     daily_time: Mapped[str | None] = mapped_column(String, nullable=True)  # "HH:MM"

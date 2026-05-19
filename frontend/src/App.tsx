@@ -4,8 +4,8 @@ import { AppShell } from "@/components/layout/AppShell";
 import { AccountProvider } from "@/contexts/AccountContext";
 import { Dashboard } from "@/pages/Dashboard";
 import { AccountDetail } from "@/pages/AccountDetail";
-import { AddAccount } from "@/pages/AddAccount";
-import { UnfollowerHistory } from "@/pages/UnfollowerHistory";
+import { Login } from "@/pages/Login";
+import { AddTrackedAccount } from "@/pages/AddTrackedAccount";
 import { Settings } from "@/pages/Settings";
 
 export default function App() {
@@ -14,9 +14,18 @@ export default function App() {
       <AppShell>
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/accounts/add" element={<AddAccount />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/tracked/add" element={<AddTrackedAccount />} />
           <Route path="/accounts/:id" element={<AccountDetail />} />
-          <Route path="/accounts/:id/unfollowers" element={<UnfollowerHistory />} />
+          {/* Legacy redirect */}
+          <Route
+            path="/accounts/add"
+            element={<Navigate to="/login" replace />}
+          />
+          <Route
+            path="/accounts/:id/unfollowers"
+            element={<Navigate to="../?tab=history" relative="path" replace />}
+          />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

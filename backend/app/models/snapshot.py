@@ -1,4 +1,4 @@
-"""Snapshot ORM models — historical follower/following lists."""
+"""Snapshot ORM models — historical follower/following lists per tracked account."""
 from datetime import datetime
 from typing import Literal
 
@@ -15,7 +15,9 @@ class Snapshot(Base):
     __tablename__ = "snapshots"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    tracked_account_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_accounts.id", ondelete="CASCADE"), index=True
+    )
     taken_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
@@ -32,7 +34,9 @@ class SnapshotUser(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    snapshot_id: Mapped[int] = mapped_column(ForeignKey("snapshots.id"), index=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("snapshots.id", ondelete="CASCADE"), index=True
+    )
     instagram_user_id: Mapped[str] = mapped_column(String, index=True)
     username: Mapped[str] = mapped_column(String)
     full_name: Mapped[str | None] = mapped_column(String, nullable=True)

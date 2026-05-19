@@ -36,6 +36,6 @@ def reconcile_account_schedule(schedule: Schedule) -> None:
     """
     if not _scheduler:
         return
-    job_id = f"scan-account-{schedule.account_id}"
+    job_id = f"scan-tracked-{schedule.tracked_account_id}"
     # TODO: implementation
     _ = job_id

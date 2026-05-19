@@ -1,4 +1,4 @@
-"""Unfollower log — permanent record of detected unfollows."""
+"""Unfollower log — permanent record of detected unfollows per tracked account."""
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
@@ -11,7 +11,9 @@ class Unfollower(Base):
     __tablename__ = "unfollowers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    tracked_account_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_accounts.id", ondelete="CASCADE"), index=True
+    )
     instagram_user_id: Mapped[str] = mapped_column(String, index=True)
     username: Mapped[str] = mapped_column(String)
     full_name: Mapped[str | None] = mapped_column(String, nullable=True)

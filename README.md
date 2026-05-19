@@ -8,12 +8,14 @@ Built with **FastAPI** (Python) backend and **React + TypeScript** frontend. Des
 
 ## Features
 
-- **Multi-account tracking** — Track unfollowers across multiple Instagram accounts (yours, your partner's, etc.)
+- **Single throwaway login, many tracked profiles** — Log in **once** with a secondary Instagram account; that session is then reused to scan any number of *tracked* profiles (your main, your partner's, etc.) **without ever logging them in**. Only the throwaway account is exposed to the tool, so if anything goes wrong only the throwaway is at risk.
+- **In-browser fetches (no httpx)** — All Instagram API calls are made from inside the live Chromium tab via `page.evaluate()`, so the requests carry a real Chrome TLS/JA3 fingerprint, real `sec-ch-ua-*` hints, and the matching User-Agent. This avoids the "we detected unusual activity" flagging that hits server-side scrapers.
+- **Follow-relationship check** — A tracked account can only be added (and scanned) if the logged-in account follows it. The scan refuses to run otherwise.
+- **Retry-until-complete pagination** — Instagram's followers/following endpoint returns a re-ranked, partial list per call. Each scan fetches the canonical follower/following count up-front, then paginates repeatedly (up to 30 attempts, ~10–30 s cool-off between) unioning unique IDs until the count is reached or the list plateaus. Partial captures are still saved with a warning; the diff proceeds so you're never blocked on a "one user short" plateau.
 - **Browser-based login** — Log into Instagram through the dashboard with full support for 2FA and security challenges
 - **Historical snapshots** — Stores follower history in SQLite to detect changes over time
-- **Unfollower detection** — Identifies who unfollowed you and when, with a permanent log
+- **Unfollower detection** — Identifies who unfollowed and when, with a permanent log per tracked account
 - **Whitelist system** — Mark accounts (celebrities, brands) as "OK to not follow back" and filter them out of your view
-- **Smart filtering** — View only the people you actually care about
 - **Manual + scheduled scans** — Trigger updates manually or on a schedule (daily at specific time, every X hours, or both)
 - **Home Assistant integration** — Sends a webhook with new unfollowers' usernames so HA can push to your phone
 - **Web dashboard** — Clean React interface accessible on your home network
@@ -48,7 +50,9 @@ Built with **FastAPI** (Python) backend and **React + TypeScript** frontend. Des
 
 4. Open the dashboard at `http://YOUR_SERVER_IP:8000` (or whatever port you set)
 
-5. Click **"Add Account"**, log in with your Instagram credentials, complete any 2FA/security checks. The session will be saved for future automated scans.
+5. Click **"Log in"** and authenticate with a **throwaway / secondary** Instagram account (do **not** use your main). Complete any 2FA. The session is encrypted and saved.
+
+6. Click **"Add tracked account"** and enter the Instagram handle you want to track (e.g. your main). The tool verifies the throwaway is following that profile, then starts scanning. Add as many tracked accounts as you like — they never authenticate through the tool.
 
 ---
 
@@ -152,10 +156,10 @@ volumes:
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical design.
 
 **TL;DR**:
-- **Backend**: FastAPI + SQLAlchemy + APScheduler + Playwright (for Instagram login)
+- **Backend**: FastAPI + SQLAlchemy + APScheduler + Playwright (login **and** every scan API call runs through a real Chromium tab on Xvfb).
 - **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
-- **Database**: SQLite (file at `/app/data/tracker.db`)
-- **Container**: Single Docker image, multi-stage build, exposes one port
+- **Database**: SQLite (file at `/app/data/tracker.db`) — one `LoginAccount` row, many `TrackedAccount` rows
+- **Container**: Single Docker image, multi-stage build, exposes one port (noVNC streamed at `/novnc` for the login window)
 
 ---
 
@@ -240,7 +244,7 @@ Inspired by [InstagramUnfollowers](https://github.com/davidarroyo1234/InstagramU
 
 This tool is not affiliated with, authorized by, or endorsed by Instagram or Meta. Automating Instagram interactions may violate Instagram's Terms of Service. Use at your own risk — the maintainers accept no responsibility for account suspensions or bans.
 
-The tool uses Instagram's own GraphQL API with realistic timing delays to minimize the risk of rate-limiting or detection, but no automation tool can be 100% safe.
+The tool fetches data via Instagram's own REST endpoint (`/api/v1/friendships/`) executed from inside a real Chrome tab, with bookmarklet-style jitter, to minimise rate-limiting and detection. To further reduce risk, **only the throwaway account ever authenticates** — your main account is only ever *observed*, never logged in. No automation tool is 100% safe.
 
 ---
 

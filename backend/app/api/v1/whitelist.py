@@ -1,8 +1,5 @@
-"""Whitelist CRUD + import/export endpoints."""
-import json
-
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+"""Whitelist CRUD for a tracked account."""
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,23 +11,22 @@ from backend.app.schemas.whitelist import WhitelistCreate, WhitelistRead
 router = APIRouter()
 
 
-@router.get("/{account_id}/whitelist", response_model=list[WhitelistRead])
+@router.get("/{tracked_id}/whitelist", response_model=list[WhitelistRead])
 async def list_whitelist(
-    account_id: int, db: AsyncSession = Depends(get_db)
+    tracked_id: int, db: AsyncSession = Depends(get_db)
 ) -> list[WhitelistEntry]:
-    stmt = select(WhitelistEntry).where(WhitelistEntry.account_id == account_id)
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+    stmt = select(WhitelistEntry).where(WhitelistEntry.tracked_account_id == tracked_id)
+    return list((await db.execute(stmt)).scalars().all())
 
 
-@router.post("/{account_id}/whitelist", response_model=WhitelistRead)
+@router.post("/{tracked_id}/whitelist", response_model=WhitelistRead)
 async def add_to_whitelist(
-    account_id: int,
+    tracked_id: int,
     payload: WhitelistCreate,
     db: AsyncSession = Depends(get_db),
 ) -> WhitelistEntry:
     entry = WhitelistEntry(
-        account_id=account_id,
+        tracked_account_id=tracked_id,
         instagram_user_id=payload.instagram_user_id,
         username=payload.username,
         note=payload.note,
@@ -45,35 +41,13 @@ async def add_to_whitelist(
     return entry
 
 
-@router.delete("/{account_id}/whitelist/{entry_id}")
+@router.delete("/{tracked_id}/whitelist/{entry_id}")
 async def remove_from_whitelist(
-    account_id: int, entry_id: int, db: AsyncSession = Depends(get_db)
+    tracked_id: int, entry_id: int, db: AsyncSession = Depends(get_db)
 ) -> dict:
     entry = await db.get(WhitelistEntry, entry_id)
-    if not entry or entry.account_id != account_id:
+    if not entry or entry.tracked_account_id != tracked_id:
         raise HTTPException(status_code=404, detail="Whitelist entry not found")
     await db.delete(entry)
     await db.commit()
     return {"deleted": True}
-
-
-@router.post("/{account_id}/whitelist/import")
-async def import_whitelist(
-    account_id: int, file: UploadFile, db: AsyncSession = Depends(get_db)
-) -> dict:
-    """Bulk import from JSON file (compatible with original tool format)."""
-    raw = await file.read()
-    try:
-        users = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-    # TODO: validate + insert
-    return {"imported": len(users)}
-
-
-@router.get("/{account_id}/whitelist/export")
-async def export_whitelist(
-    account_id: int, db: AsyncSession = Depends(get_db)
-) -> StreamingResponse:
-    # TODO: stream JSON download
-    return StreamingResponse(iter([b"[]"]), media_type="application/json")
