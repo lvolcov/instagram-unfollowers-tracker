@@ -43,9 +43,15 @@ async def init_db() -> None:
         unfollower,
         whitelist,
         schedule,
+        app_settings,
     )
 
     async with engine.begin() as conn:
+        # Schedule model was redesigned (many-per-account, new columns) on
+        # 2026-05-19. Drop the old table on startup so create_all builds the
+        # new shape; any pre-redesign rows were stubs that never actually fired.
+        from sqlalchemy import text as _text
+        await conn.execute(_text("DROP TABLE IF EXISTS schedules"))
         await conn.run_sync(Base.metadata.create_all)
 
 

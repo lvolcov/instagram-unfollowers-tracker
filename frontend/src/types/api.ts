@@ -52,23 +52,46 @@ export interface WhitelistEntry {
   added_at: string;
 }
 
-export type ScheduleMode = "daily_at" | "interval_hours" | "manual_only";
+export type ScheduleMode = "daily_at" | "weekly_on" | "interval_hours";
 
 export interface Schedule {
   id: number;
   tracked_account_id: number;
+  name: string;
   mode: ScheduleMode;
-  daily_time: string | null;
+  daily_time: string | null;       // "HH:MM"
+  weekly_day: number | null;       // 0=Mon..6=Sun
   interval_hours: number | null;
+  webhook_url: string | null;
   enabled: boolean;
   next_run_at: string | null;
+  last_run_at: string | null;
+  last_run_status: string | null;
+}
+
+export interface ScheduleCreate {
+  tracked_account_id: number;
+  name?: string;
+  mode: ScheduleMode;
+  daily_time?: string | null;
+  weekly_day?: number | null;
+  interval_hours?: number | null;
+  webhook_url?: string | null;
+  enabled?: boolean;
 }
 
 export interface ScheduleUpdate {
-  mode: ScheduleMode;
+  name?: string;
+  mode?: ScheduleMode;
   daily_time?: string | null;
+  weekly_day?: number | null;
   interval_hours?: number | null;
-  enabled: boolean;
+  webhook_url?: string | null;
+  enabled?: boolean;
+}
+
+export interface AppSettings {
+  health_webhook_url: string | null;
 }
 
 export interface ScanJob {

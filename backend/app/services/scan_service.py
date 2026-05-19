@@ -30,21 +30,32 @@ class ScanService:
         self._jobs: dict[str, ScanJob] = {}
         self._scan_lock = asyncio.Lock()  # only one scan at a time (shared Xvfb display)
 
-    async def enqueue(self, tracked_account_id: int) -> ScanJob:
+    async def enqueue(
+        self, tracked_account_id: int, *, schedule_id: int | None = None
+    ) -> ScanJob:
         job = ScanJob(
             job_id=uuid.uuid4().hex,
             tracked_account_id=tracked_account_id,
             status="queued",
         )
         self._jobs[job.job_id] = job
-        asyncio.create_task(self._run(tracked_account_id, job))
+        asyncio.create_task(self._run(tracked_account_id, job, schedule_id))
         return job
 
     def get_job(self, job_id: str) -> ScanJob | None:
         return self._jobs.get(job_id)
 
-    async def _run(self, tracked_account_id: int, job: ScanJob) -> None:
-        log = logger.bind(tracked_account_id=tracked_account_id, job_id=job.job_id)
+    async def _run(
+        self,
+        tracked_account_id: int,
+        job: ScanJob,
+        schedule_id: int | None = None,
+    ) -> None:
+        log = logger.bind(
+            tracked_account_id=tracked_account_id,
+            job_id=job.job_id,
+            schedule_id=schedule_id,
+        )
         async with self._scan_lock:
             job.status = "running"
             snapshot_id: int | None = None
@@ -218,10 +229,20 @@ class ScanService:
                     job.progress = ScanProgress(
                         phase="notify", current=0, total=len(new_unfollowers)
                     )
+                    # Per-schedule webhook URL override (if scan was triggered
+                    # by a schedule and the schedule has its own webhook_url).
+                    override_url: str | None = None
+                    if schedule_id is not None:
+                        from backend.app.models.schedule import Schedule
+                        async with AsyncSessionLocal() as db:
+                            sched = await db.get(Schedule, schedule_id)
+                            if sched and sched.webhook_url:
+                                override_url = sched.webhook_url
                     try:
-                        await webhook_service.send(
+                        await webhook_service.send_unfollowers(
                             account=target_username,
                             unfollowers=[u.username for u in new_unfollowers],
+                            url=override_url,
                         )
                     except Exception as exc:
                         log.warning("scan.webhook_failed", error=str(exc))
@@ -256,9 +277,21 @@ class ScanService:
                 log.warning("scan.session_expired", error=str(exc))
                 async with AsyncSessionLocal() as db:
                     login = (await db.execute(select(LoginAccount))).scalar_one_or_none()
+                    login_username = login.username if login else None
                     if login:
                         login.session_status = "needs_relogin"
                         await db.commit()
+                # Fire health webhook so the user knows trabalho_otimizado
+                # needs to log in again before the next scheduled scan can run.
+                try:
+                    await webhook_service.send_health(
+                        event="session_expired",
+                        login_account=login_username,
+                        tracked_account_id=tracked_account_id,
+                        message=str(exc),
+                    )
+                except Exception as e:
+                    log.warning("scan.health_webhook_failed", error=str(e))
             except Exception as exc:
                 job.status = "failed"
                 job.error = str(exc)
@@ -270,6 +303,16 @@ class ScanService:
                             snap.status = "failed"
                             snap.error_message = str(exc)
                             await db.commit()
+
+        # ----- after lock released -----
+        # Reflect outcome on the schedule row that triggered us.
+        if schedule_id is not None:
+            from backend.app.models.schedule import Schedule
+            async with AsyncSessionLocal() as db:
+                sched = await db.get(Schedule, schedule_id)
+                if sched:
+                    sched.last_run_status = job.status
+                    await db.commit()
 
     async def _diff_unfollowers(
         self,

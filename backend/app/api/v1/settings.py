@@ -21,7 +21,6 @@ async def get_settings() -> dict:
 
 
 @router.post("/webhook/test")
-async def test_webhook() -> dict:
-    """Fire a dummy payload at the configured HA webhook so the user can verify wiring."""
-    result = await webhook_service.send_test()
-    return result
+async def test_webhook(url: str | None = None) -> dict:
+    """Fire a dummy payload at a webhook URL (defaults to the HA URL from .env)."""
+    return await webhook_service.send_test(url=url)

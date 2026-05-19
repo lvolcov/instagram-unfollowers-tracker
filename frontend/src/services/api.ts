@@ -1,9 +1,11 @@
 import axios from "axios";
 
 import type {
+  AppSettings,
   LoginAccount,
   ScanJob,
   Schedule,
+  ScheduleCreate,
   ScheduleUpdate,
   TrackedAccount,
   Unfollower,
@@ -108,14 +110,29 @@ export const addToWhitelist = (
 export const removeFromWhitelist = (id: number, entryId: number) =>
   api.delete(`/tracked-accounts/${id}/whitelist/${entryId}`).then((r) => r.data);
 
-// ----- Schedule -----
-export const getSchedule = (id: number) =>
-  api.get<Schedule>(`/tracked-accounts/${id}/schedule`).then((r) => r.data);
+// ----- Schedules (global CRUD) -----
+export const listSchedules = () =>
+  api.get<Schedule[]>("/schedules").then((r) => r.data);
+export const createSchedule = (data: ScheduleCreate) =>
+  api.post<Schedule>("/schedules", data).then((r) => r.data);
 export const updateSchedule = (id: number, data: ScheduleUpdate) =>
-  api.put<Schedule>(`/tracked-accounts/${id}/schedule`, data).then((r) => r.data);
+  api.put<Schedule>(`/schedules/${id}`, data).then((r) => r.data);
+export const deleteSchedule = (id: number) =>
+  api.delete(`/schedules/${id}`).then((r) => r.data);
 
-// ----- Settings -----
+// ----- Settings (env-backed read-only) -----
 export const getSettings = () => api.get("/settings").then((r) => r.data);
-export const testWebhook = () => api.post("/settings/webhook/test").then((r) => r.data);
+export const testWebhook = (url?: string) =>
+  api
+    .post("/settings/webhook/test", null, { params: url ? { url } : undefined })
+    .then((r) => r.data);
+
+// ----- App settings (runtime, DB-backed) -----
+export const getAppSettings = () =>
+  api.get<AppSettings>("/app-settings").then((r) => r.data);
+export const updateAppSettings = (data: Partial<AppSettings>) =>
+  api.put<AppSettings>("/app-settings", data).then((r) => r.data);
+export const testHealthWebhook = () =>
+  api.post("/app-settings/health-webhook/test").then((r) => r.data);
 
 export default api;
