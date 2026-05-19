@@ -92,7 +92,8 @@ class ScanService:
                         t.is_private = status.is_private
                         await db.commit()
 
-                    # Canonical counts so we know when pagination is complete.
+                    # Canonical counts via the public user-info endpoint
+                    # (this one still returns JSON to page.evaluate fetches).
                     info = await ig.user_info(target_uid)
                     expected_followers = int(info.get("follower_count") or 0)
                     expected_following = int(info.get("following_count") or 0)
@@ -111,24 +112,26 @@ class ScanService:
                             )
                         return _cb
 
+                    # Bookmarklet-style GraphQL fetch — the v1 REST endpoint
+                    # returns the SPA HTML shell to spoofed fetches; the
+                    # GraphQL endpoint still returns JSON.
                     log.info("scan.fetching_followers", target=target_username)
-                    followers, fol_attempts, followers_complete = await ig.collect_complete(
-                        "followers",
-                        target_uid,
-                        expected_followers,
+                    followers, followers_complete = await ig.collect_via_graphql(
+                        target_user_id=target_uid,
+                        kind="followers",
+                        expected_count=expected_followers,
                         on_progress=_progress("followers"),
                     )
 
                     log.info(
                         "scan.fetching_following",
                         followers_seen=len(followers),
-                        followers_attempts=fol_attempts,
                         followers_complete=followers_complete,
                     )
-                    following, fwg_attempts, following_complete = await ig.collect_complete(
-                        "following",
-                        target_uid,
-                        expected_following,
+                    following, following_complete = await ig.collect_via_graphql(
+                        target_user_id=target_uid,
+                        kind="following",
+                        expected_count=expected_following,
                         on_progress=_progress("following"),
                     )
                     log.info(
@@ -137,8 +140,6 @@ class ScanService:
                         following=len(following),
                         followers_complete=followers_complete,
                         following_complete=following_complete,
-                        fol_attempts=fol_attempts,
-                        fwg_attempts=fwg_attempts,
                     )
 
                 follower_ids = {u.id for u in followers}
@@ -179,10 +180,9 @@ class ScanService:
                 if not fully_captured:
                     warning = (
                         f"Captured {len(followers)}/{expected_followers} followers"
-                        f" (attempts {fol_attempts}) and"
-                        f" {len(following)}/{expected_following} following"
-                        f" (attempts {fwg_attempts}) — Instagram's re-ranking"
-                        " left a few users uncaptured. Diff proceeded; expect a"
+                        f" and {len(following)}/{expected_following} following"
+                        " — Instagram's modal stopped serving more before the"
+                        " canonical count was reached. Diff proceeded; expect a"
                         " few false-positive unfollowers."
                     )
                     log.warning("scan.partial", warning=warning)

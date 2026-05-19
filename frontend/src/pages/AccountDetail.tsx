@@ -12,6 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
   AlertTriangle,
+  Copy,
+  Check,
 } from "lucide-react";
 
 import {
@@ -50,11 +52,30 @@ interface UserRowProps {
   isWhitelisted?: boolean;
   onWhitelist?: () => void;
   onUnwhitelist?: () => void;
+  isSelected?: boolean;
+  onSelectChange?: (next: boolean) => void;
 }
 
-function UserRow({ user, isWhitelisted, whitelistEntry, onWhitelist, onUnwhitelist }: UserRowProps) {
+function UserRow({
+  user,
+  isWhitelisted,
+  whitelistEntry,
+  onWhitelist,
+  onUnwhitelist,
+  isSelected,
+  onSelectChange,
+}: UserRowProps) {
   return (
     <li className="flex items-center gap-3 py-2.5 group">
+      {onSelectChange && (
+        <input
+          type="checkbox"
+          checked={!!isSelected}
+          onChange={(e) => onSelectChange(e.target.checked)}
+          className="h-4 w-4 cursor-pointer accent-primary flex-shrink-0"
+          aria-label={`Select @${user.username}`}
+        />
+      )}
       <Avatar src={user.profile_pic_url} username={user.username} size={36} />
       <div className="flex-1 min-w-0">
         <a
@@ -107,14 +128,24 @@ interface UserListProps {
   queryFn: (page: number, search: string) => Promise<{ users: IGUser[]; total: number }>;
   emptyMessage: string;
   showWhitelistToggle?: boolean;
+  selectable?: boolean;
 }
 
-function UserList({ accountId, queryKey, queryFn, emptyMessage, showWhitelistToggle }: UserListProps) {
+function UserList({
+  accountId,
+  queryKey,
+  queryFn,
+  emptyMessage,
+  showWhitelistToggle,
+  selectable,
+}: UserListProps) {
   const qc = useQueryClient();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [selected, setSelected] = useState<Map<string, string>>(new Map());
+  const [copied, setCopied] = useState(false);
 
   const handleSearchChange = (val: string) => {
     setSearch(val);
@@ -154,6 +185,35 @@ function UserList({ accountId, queryKey, queryFn, emptyMessage, showWhitelistTog
   const pageSize = 50;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
+  const toggleOne = (uid: string, username: string, next: boolean) => {
+    setSelected((prev) => {
+      const m = new Map(prev);
+      if (next) m.set(uid, username);
+      else m.delete(uid);
+      return m;
+    });
+  };
+  const selectAllOnPage = () => {
+    setSelected((prev) => {
+      const m = new Map(prev);
+      users.forEach((u) => m.set(u.instagram_user_id, u.username));
+      return m;
+    });
+  };
+  const clearSelection = () => setSelected(new Map());
+  const copySelected = async () => {
+    if (selected.size === 0) return;
+    const text = Array.from(selected.values())
+      .sort()
+      .map((u) => `@${u}`)
+      .join("\n");
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const allOnPageSelected =
+    users.length > 0 && users.every((u) => selected.has(u.instagram_user_id));
+
   return (
     <div className="space-y-3">
       {/* Search */}
@@ -174,6 +234,46 @@ function UserList({ accountId, queryKey, queryFn, emptyMessage, showWhitelistTog
           </button>
         )}
       </div>
+
+      {/* Selection toolbar */}
+      {selectable && !isLoading && users.length > 0 && (
+        <div className="flex items-center justify-between gap-2 flex-wrap p-2 bg-surface border border-border rounded-xl text-sm">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() =>
+                allOnPageSelected
+                  ? users.forEach((u) =>
+                      setSelected((prev) => {
+                        const m = new Map(prev);
+                        m.delete(u.instagram_user_id);
+                        return m;
+                      })
+                    )
+                  : selectAllOnPage()
+              }
+              className="px-2.5 py-1 rounded-lg hover:bg-surface-2 cursor-pointer"
+            >
+              {allOnPageSelected ? "Deselect page" : "Select page"}
+            </button>
+            {selected.size > 0 && (
+              <button
+                onClick={clearSelection}
+                className="px-2.5 py-1 rounded-lg text-muted hover:text-foreground hover:bg-surface-2 cursor-pointer"
+              >
+                Clear ({selected.size})
+              </button>
+            )}
+          </div>
+          <button
+            onClick={copySelected}
+            disabled={selected.size === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-primary hover:bg-primary-hover text-white rounded-lg font-medium disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "Copied" : `Copy ${selected.size} username${selected.size === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      )}
 
       {/* Count + pagination */}
       {!isLoading && (
@@ -228,6 +328,12 @@ function UserList({ accountId, queryKey, queryFn, emptyMessage, showWhitelistTog
                 onUnwhitelist={
                   showWhitelistToggle && wlEntry
                     ? () => unwhitelistMutation.mutate(wlEntry.id)
+                    : undefined
+                }
+                isSelected={selectable ? selected.has(u.instagram_user_id) : undefined}
+                onSelectChange={
+                  selectable
+                    ? (next) => toggleOne(u.instagram_user_id, u.username, next)
                     : undefined
                 }
               />
@@ -437,6 +543,18 @@ const TAB_LABELS: Record<string, string> = {
   history: "Unfollower history",
 };
 
+const TAB_DESCRIPTIONS: Record<string, string> = {
+  followers: "Everyone who follows this account.",
+  following: "Every account this account follows.",
+  "non-followers":
+    "You follow them, they don't follow you back. Star to whitelist (e.g. brands you don't expect to follow you).",
+  "not-following":
+    "They follow you, you don't follow them back. Useful for spotting fans you might want to follow.",
+  whitelist:
+    "Accounts you've marked as OK to not follow you back — filtered out of the \"Not following back\" tab.",
+  history: "Permanent log of accounts that have unfollowed since tracking started.",
+};
+
 export function AccountDetail() {
   const { id } = useParams<{ id: string }>();
   const accountId = Number(id);
@@ -552,9 +670,12 @@ export function AccountDetail() {
         </div>
       )}
 
-      {/* Section title */}
+      {/* Section title + description */}
       <div className="border-b border-border pb-2">
         <h2 className="font-semibold text-foreground">{TAB_LABELS[tab] ?? tab}</h2>
+        {TAB_DESCRIPTIONS[tab] && (
+          <p className="text-sm text-muted mt-1">{TAB_DESCRIPTIONS[tab]}</p>
+        )}
       </div>
 
       {/* Tab content */}
@@ -567,6 +688,7 @@ export function AccountDetail() {
             queryKey={["followers", String(accountId)]}
             queryFn={(page, search) => listFollowers(accountId, page, search)}
             emptyMessage="No followers found. Run a scan first."
+            selectable
           />
         )}
 
@@ -576,6 +698,7 @@ export function AccountDetail() {
             queryKey={["following", String(accountId)]}
             queryFn={(page, search) => listFollowing(accountId, page, search)}
             emptyMessage="Not following anyone. Run a scan first."
+            selectable
           />
         )}
 
@@ -586,6 +709,7 @@ export function AccountDetail() {
             queryFn={(page, search) => listNonFollowers(accountId, false, page, search)}
             emptyMessage="Everyone you follow also follows you back."
             showWhitelistToggle
+            selectable
           />
         )}
 
@@ -595,6 +719,7 @@ export function AccountDetail() {
             queryKey={["not-following", String(accountId)]}
             queryFn={(page, search) => listFollowersNotFollowingBack(accountId, page, search)}
             emptyMessage="You follow everyone who follows you."
+            selectable
           />
         )}
 
