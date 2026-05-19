@@ -90,6 +90,16 @@ export interface ScheduleUpdate {
   enabled?: boolean;
 }
 
+export interface NewFollower {
+  id: number;
+  tracked_account_id: number;
+  instagram_user_id: string;
+  username: string;
+  full_name: string | null;
+  profile_pic_url: string | null;
+  detected_at: string;
+}
+
 export interface AppSettings {
   health_webhook_url: string | null;
 }
@@ -99,6 +109,6 @@ export interface ScanJob {
   tracked_account_id: number;
   status: "queued" | "running" | "completed" | "failed";
   progress?: { phase: string; current: number; total: number };
-  result?: { snapshot_id: number; new_unfollowers: number; warning?: string | null };
+  result?: { snapshot_id: number; new_unfollowers: number; new_followers: number; warning?: string | null };
   error?: string;
 }

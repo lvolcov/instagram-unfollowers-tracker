@@ -23,6 +23,7 @@ import {
   listFollowersNotFollowingBack,
   listFollowing,
   listNonFollowers,
+  listNewFollowers,
   listUnfollowers,
   listWhitelist,
   addToWhitelist,
@@ -30,7 +31,7 @@ import {
   triggerScan,
 } from "@/services/api";
 import { Avatar } from "@/components/common/Avatar";
-import type { IGUser, ScanJob, Unfollower, WhitelistEntry } from "@/types/api";
+import type { IGUser, NewFollower, ScanJob, Unfollower, WhitelistEntry } from "@/types/api";
 
 // ── Stat card ──────────────────────────────────────────────────────────────
 
@@ -347,6 +348,45 @@ function UserList({
 
 // ── Overview tab ───────────────────────────────────────────────────────────
 
+function RecentList({
+  title,
+  items,
+  colorClass,
+}: {
+  title: string;
+  items: { id: number; username: string; full_name?: string | null; profile_pic_url?: string | null; detected_at: string }[];
+  colorClass: string;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div className="bg-surface border border-border rounded-2xl p-4">
+      <h3 className={`font-semibold mb-3 text-sm ${colorClass}`}>{title}</h3>
+      <ul className="divide-y divide-border">
+        {items.map((u) => (
+          <li key={u.id} className="flex items-center gap-3 py-2.5 group">
+            <Avatar src={u.profile_pic_url ?? null} username={u.username} size={32} />
+            <div className="flex-1 min-w-0">
+              <a
+                href={`https://www.instagram.com/${u.username}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm font-medium hover:text-primary transition-colors flex items-center gap-1 cursor-pointer"
+              >
+                @{u.username}
+                <ExternalLink size={10} className="text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
+              </a>
+              {u.full_name && <p className="text-xs text-muted truncate">{u.full_name}</p>}
+            </div>
+            <span className="text-xs text-muted flex-shrink-0">
+              {new Date(u.detected_at).toLocaleDateString()}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function OverviewTab({ accountId }: { accountId: number }) {
   const { data: followers } = useQuery({
     queryKey: ["followers", accountId, 1, ""],
@@ -368,8 +408,10 @@ function OverviewTab({ accountId }: { accountId: number }) {
     queryKey: ["unfollowers", accountId],
     queryFn: () => listUnfollowers(accountId),
   });
-
-  const recent = unfollowers.slice(0, 5);
+  const { data: newFollowers = [] } = useQuery({
+    queryKey: ["new-followers", accountId],
+    queryFn: () => listNewFollowers(accountId),
+  });
 
   return (
     <div className="space-y-6">
@@ -388,32 +430,16 @@ function OverviewTab({ accountId }: { accountId: number }) {
         />
       </div>
 
-      {recent.length > 0 && (
-        <div className="bg-surface border border-border rounded-2xl p-4">
-          <h3 className="font-semibold mb-3 text-sm">Recent unfollowers</h3>
-          <ul className="divide-y divide-border">
-            {recent.map((u: Unfollower) => (
-              <li key={u.id} className="flex items-center gap-3 py-2.5 group">
-                <Avatar src={u.profile_pic_url} username={u.username} size={32} />
-                <div className="flex-1 min-w-0">
-                  <a
-                    href={`https://www.instagram.com/${u.username}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-sm font-medium hover:text-primary transition-colors flex items-center gap-1 cursor-pointer"
-                  >
-                    @{u.username}
-                    <ExternalLink size={10} className="text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
-                  </a>
-                </div>
-                <span className="text-xs text-muted flex-shrink-0">
-                  {new Date(u.detected_at).toLocaleDateString()}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <RecentList
+        title="Recent new followers"
+        items={newFollowers.slice(0, 5)}
+        colorClass="text-success"
+      />
+      <RecentList
+        title="Recent unfollowers"
+        items={unfollowers.slice(0, 5)}
+        colorClass="text-danger"
+      />
     </div>
   );
 }
@@ -485,7 +511,7 @@ function WhitelistTab({ accountId }: { accountId: number }) {
   );
 }
 
-// ── History tab ────────────────────────────────────────────────────────────
+// ── History tab (unfollowers) ──────────────────────────────────────────────
 
 function HistoryTab({ accountId }: { accountId: number }) {
   const { data: unfollowers = [], isLoading } = useQuery({
@@ -531,6 +557,56 @@ function HistoryTab({ accountId }: { accountId: number }) {
   );
 }
 
+// ── New followers tab ──────────────────────────────────────────────────────
+
+function NewFollowersTab({ accountId }: { accountId: number }) {
+  const { data: newFollowers = [], isLoading } = useQuery({
+    queryKey: ["new-followers", accountId],
+    queryFn: () => listNewFollowers(accountId),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-muted py-8 justify-center">
+        <RefreshCw size={16} className="animate-spin" /> Loading…
+      </div>
+    );
+  }
+
+  if (newFollowers.length === 0) {
+    return (
+      <p className="text-muted text-sm py-8 text-center">
+        No new followers recorded yet. New followers are detected on each scan compared to the previous one.
+      </p>
+    );
+  }
+
+  return (
+    <ul className="divide-y divide-border">
+      {newFollowers.map((u: NewFollower) => (
+        <li key={u.id} className="flex items-center gap-3 py-2.5 group">
+          <Avatar src={u.profile_pic_url} username={u.username} size={36} />
+          <div className="flex-1 min-w-0">
+            <a
+              href={`https://www.instagram.com/${u.username}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium hover:text-primary transition-colors flex items-center gap-1 cursor-pointer"
+            >
+              @{u.username}
+              <ExternalLink size={11} className="text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
+            </a>
+            {u.full_name && <p className="text-xs text-muted">{u.full_name}</p>}
+          </div>
+          <span className="text-xs text-muted flex-shrink-0">
+            {new Date(u.detected_at).toLocaleDateString()}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────
 
 const TAB_LABELS: Record<string, string> = {
@@ -541,6 +617,7 @@ const TAB_LABELS: Record<string, string> = {
   "not-following": "Doesn't follow back",
   whitelist: "Whitelist",
   history: "Unfollower history",
+  "new-followers": "New followers",
 };
 
 const TAB_DESCRIPTIONS: Record<string, string> = {
@@ -553,6 +630,8 @@ const TAB_DESCRIPTIONS: Record<string, string> = {
   whitelist:
     "Accounts you've marked as OK to not follow you back — filtered out of the \"Not following back\" tab.",
   history: "Permanent log of accounts that have unfollowed since tracking started.",
+  "new-followers":
+    "Permanent log of accounts that started following since the previous scan. Detected each time a scan runs.",
 };
 
 export function AccountDetail() {
@@ -582,6 +661,7 @@ export function AccountDetail() {
         qc.invalidateQueries({ queryKey: ["non-followers", accountId] });
         qc.invalidateQueries({ queryKey: ["not-following", accountId] });
         qc.invalidateQueries({ queryKey: ["unfollowers", accountId] });
+        qc.invalidateQueries({ queryKey: ["new-followers", accountId] });
       }
       return;
     }
@@ -647,7 +727,9 @@ export function AccountDetail() {
         <>
           <div className="flex items-center gap-2 p-3 bg-success/10 border border-success/30 rounded-xl text-sm text-success">
             Scan complete — {activeScan.result.new_unfollowers} new unfollower
-            {activeScan.result.new_unfollowers !== 1 ? "s" : ""} detected.
+            {activeScan.result.new_unfollowers !== 1 ? "s" : ""} and{" "}
+            {activeScan.result.new_followers ?? 0} new follower
+            {(activeScan.result.new_followers ?? 0) !== 1 ? "s" : ""} detected.
           </div>
           {activeScan.result.warning && (
             <div className="flex items-start gap-2 p-3 bg-warning/10 border border-warning/30 rounded-xl text-sm text-warning">
@@ -726,6 +808,8 @@ export function AccountDetail() {
         {tab === "whitelist" && <WhitelistTab accountId={accountId} />}
 
         {tab === "history" && <HistoryTab accountId={accountId} />}
+
+        {tab === "new-followers" && <NewFollowersTab accountId={accountId} />}
       </div>
     </div>
   );

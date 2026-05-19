@@ -16,6 +16,7 @@ from backend.app.instagram.client import (
     SessionExpiredError,
 )
 from backend.app.models.login_account import LoginAccount
+from backend.app.models.new_follower import NewFollower
 from backend.app.models.snapshot import Snapshot, SnapshotUser
 from backend.app.models.tracked_account import TrackedAccount
 from backend.app.models.unfollower import Unfollower
@@ -224,6 +225,9 @@ class ScanService:
                 new_unfollowers = await self._diff_unfollowers(
                     tracked_account_id, snapshot_id, follower_ids, log
                 )
+                new_followers = await self._diff_new_followers(
+                    tracked_account_id, snapshot_id, follower_ids, log
+                )
 
                 if new_unfollowers:
                     job.progress = ScanProgress(
@@ -252,6 +256,7 @@ class ScanService:
                 job.result = ScanResult(
                     snapshot_id=snapshot_id,
                     new_unfollowers=len(new_unfollowers),
+                    new_followers=len(new_followers),
                     warning=warning,
                 )
                 log.info(
@@ -379,6 +384,83 @@ class ScanService:
                 for r in records:
                     await db.refresh(r)
             log.info("scan.unfollowers_recorded", count=len(records))
+            return records
+
+    async def _diff_new_followers(
+        self,
+        tracked_account_id: int,
+        current_snapshot_id: int,
+        current_follower_ids: set[str],
+        log,
+    ) -> list[NewFollower]:
+        async with AsyncSessionLocal() as db:
+            prev_result = await db.execute(
+                select(Snapshot)
+                .where(
+                    Snapshot.tracked_account_id == tracked_account_id,
+                    Snapshot.status == "completed",
+                    Snapshot.id < current_snapshot_id,
+                )
+                .order_by(Snapshot.id.desc())
+                .limit(1)
+            )
+            prev_snap = prev_result.scalar_one_or_none()
+            if not prev_snap:
+                log.info("scan.first_scan_no_new_followers_diff")
+                return []
+
+            prev_followers_result = await db.execute(
+                select(SnapshotUser).where(
+                    SnapshotUser.snapshot_id == prev_snap.id,
+                    SnapshotUser.relationship.in_(["follower", "mutual"]),
+                )
+            )
+            prev_follower_ids = {u.instagram_user_id for u in prev_followers_result.scalars()}
+
+            # Users in current snapshot that were NOT in previous snapshot.
+            new_ids = current_follower_ids - prev_follower_ids
+            if not new_ids:
+                return []
+
+            # Skip IDs already recorded as new followers.
+            existing_result = await db.execute(
+                select(NewFollower.instagram_user_id).where(
+                    NewFollower.tracked_account_id == tracked_account_id,
+                    NewFollower.instagram_user_id.in_(new_ids),
+                )
+            )
+            already = {r for r in existing_result.scalars()}
+            new_ids -= already
+
+            # Look up user data from current snapshot.
+            current_result = await db.execute(
+                select(SnapshotUser).where(
+                    SnapshotUser.snapshot_id == current_snapshot_id,
+                    SnapshotUser.instagram_user_id.in_(new_ids),
+                )
+            )
+            current_users = {u.instagram_user_id: u for u in current_result.scalars()}
+
+            records: list[NewFollower] = []
+            for uid in new_ids:
+                user = current_users.get(uid)
+                if not user:
+                    continue
+                records.append(
+                    NewFollower(
+                        tracked_account_id=tracked_account_id,
+                        instagram_user_id=uid,
+                        username=user.username,
+                        full_name=user.full_name,
+                        profile_pic_url=user.profile_pic_url,
+                    )
+                )
+            if records:
+                db.add_all(records)
+                await db.commit()
+                for r in records:
+                    await db.refresh(r)
+            log.info("scan.new_followers_recorded", count=len(records))
             return records
 
 

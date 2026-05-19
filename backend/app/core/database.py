@@ -41,6 +41,7 @@ async def init_db() -> None:
         tracked_account,
         snapshot,
         unfollower,
+        new_follower,
         whitelist,
         schedule,
         app_settings,

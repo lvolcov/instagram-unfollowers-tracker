@@ -20,6 +20,7 @@ import {
   Menu,
   X,
   UserMinus,
+  UserPlus,
   LogIn,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -40,6 +41,7 @@ const NAV_ITEMS = [
   { tab: "not-following", label: "Doesn't follow back", icon: UserMinus },
   { tab: "whitelist", label: "Whitelist", icon: Star },
   { tab: "history", label: "Unfollower history", icon: Clock },
+  { tab: "new-followers", label: "New followers", icon: UserPlus },
 ];
 
 interface SidebarProps {

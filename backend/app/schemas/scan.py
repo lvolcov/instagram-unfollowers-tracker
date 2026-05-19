@@ -15,6 +15,7 @@ class ScanProgress(BaseModel):
 class ScanResult(BaseModel):
     snapshot_id: int
     new_unfollowers: int
+    new_followers: int = 0
     warning: str | None = None
 
 

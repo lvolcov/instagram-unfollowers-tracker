@@ -3,6 +3,7 @@ import axios from "axios";
 import type {
   AppSettings,
   LoginAccount,
+  NewFollower,
   ScanJob,
   Schedule,
   ScheduleCreate,
@@ -93,6 +94,11 @@ export const listNonFollowers = (
 export const listUnfollowers = (id: number, page = 1) =>
   api
     .get<Unfollower[]>(`/tracked-accounts/${id}/unfollowers`, { params: { page } })
+    .then((r) => r.data);
+
+export const listNewFollowers = (id: number, page = 1) =>
+  api
+    .get<NewFollower[]>(`/tracked-accounts/${id}/new-followers`, { params: { page } })
     .then((r) => r.data);
 
 // ----- Whitelist -----
